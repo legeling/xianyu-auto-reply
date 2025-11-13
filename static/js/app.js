@@ -253,22 +253,81 @@ async function loadOrdersCount() {
         const data = await response.json();
         if (data.success) {
             const ordersCount = data.data ? data.data.length : 0;
-            document.getElementById('totalOrders').textContent = ordersCount;
+            const totalOrdersEl = document.getElementById('totalOrders');
+            if (totalOrdersEl) totalOrdersEl.textContent = ordersCount;
+
+            const statsOrdersEl = document.getElementById('statsOrders');
+            if (statsOrdersEl) statsOrdersEl.textContent = ordersCount;
         } else {
             console.error('加载订单数量失败:', data.message);
-            document.getElementById('totalOrders').textContent = '0';
+            const totalOrdersEl = document.getElementById('totalOrders');
+            if (totalOrdersEl) totalOrdersEl.textContent = '0';
+
+            const statsOrdersEl = document.getElementById('statsOrders');
+            if (statsOrdersEl) statsOrdersEl.textContent = '0';
         }
     } catch (error) {
         console.error('加载订单数量失败:', error);
-        document.getElementById('totalOrders').textContent = '0';
+        const totalOrdersEl = document.getElementById('totalOrders');
+        if (totalOrdersEl) totalOrdersEl.textContent = '0';
+
+        const statsOrdersEl = document.getElementById('statsOrders');
+        if (statsOrdersEl) statsOrdersEl.textContent = '0';
     }
 }
 
 // 更新仪表盘统计数据
 function updateDashboardStats(totalAccounts, totalKeywords, enabledAccounts) {
-    document.getElementById('totalAccounts').textContent = totalAccounts;
-    document.getElementById('totalKeywords').textContent = totalKeywords;
-    document.getElementById('activeAccounts').textContent = enabledAccounts;
+    const totalAccountsEl = document.getElementById('totalAccounts');
+    const totalKeywordsEl = document.getElementById('totalKeywords');
+    const activeAccountsEl = document.getElementById('activeAccounts');
+
+    if (totalAccountsEl) totalAccountsEl.textContent = totalAccounts;
+    if (totalKeywordsEl) totalKeywordsEl.textContent = totalKeywords;
+    if (activeAccountsEl) activeAccountsEl.textContent = enabledAccounts;
+
+    const statsAccountsEl = document.getElementById('statsAccounts');
+    const statsKeywordsEl = document.getElementById('statsKeywords');
+    const statsActiveEl = document.getElementById('statsActive');
+
+    if (statsAccountsEl) statsAccountsEl.textContent = totalAccounts;
+    if (statsKeywordsEl) statsKeywordsEl.textContent = totalKeywords;
+    if (statsActiveEl) statsActiveEl.textContent = enabledAccounts;
+
+    const accountSummary = document.getElementById('accountSummary');
+    if (accountSummary) {
+        accountSummary.innerHTML = `
+            <i class="bi bi-people"></i>
+            <span>${enabledAccounts}</span>
+            <span class="muted"> / ${totalAccounts} 在线</span>
+        `;
+    }
+
+    const welcomeMessageEl = document.getElementById('welcomeMessage');
+    if (welcomeMessageEl) {
+        const now = new Date();
+        const hour = now.getHours();
+        let greeting = '晚上好';
+        if (hour < 6) greeting = '夜深了';
+        else if (hour < 9) greeting = '早安';
+        else if (hour < 12) greeting = '上午好';
+        else if (hour < 14) greeting = '中午好';
+        else if (hour < 18) greeting = '下午好';
+
+        welcomeMessageEl.textContent = `${greeting}，欢迎使用闲鱼助手`;
+    }
+
+    const welcomeTimeEl = document.getElementById('welcomeTime');
+    if (welcomeTimeEl) {
+        const now = new Date();
+        welcomeTimeEl.textContent = now.toLocaleString('zh-CN', {
+            hour12: false,
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
 }
 
 // 更新仪表盘账号列表

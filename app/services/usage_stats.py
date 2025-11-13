@@ -32,7 +32,7 @@ class UsageStatistics:
         """获取或创建持久化的匿名用户ID"""
         # 保存到数据库中，确保Docker重建时ID不变
         try:
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
 
             # 尝试从数据库获取ID
             existing_id = db_manager.get_system_setting('anonymous_user_id')
@@ -47,7 +47,7 @@ class UsageStatistics:
 
         # 保存到数据库
         try:
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
             db_manager.set_system_setting('anonymous_user_id', new_id)
         except Exception:
             pass

@@ -110,34 +110,37 @@
 
 ```
 xianyu-auto-reply/
-├── 📄 核心文件
-│   ├── Start.py                    # 项目启动入口，初始化所有服务
-│   ├── XianyuAutoAsync.py         # 闲鱼WebSocket连接和消息处理核心
-│   ├── reply_server.py            # FastAPI Web服务器和完整API接口
-│   ├── db_manager.py              # SQLite数据库管理，支持多用户数据隔离
-│   ├── cookie_manager.py          # 多账号Cookie管理和任务调度
-│   ├── ai_reply_engine.py         # AI智能回复引擎，支持多种AI模型
-│   ├── order_status_handler.py    # 订单状态处理和更新模块
-│   ├── file_log_collector.py      # 实时日志收集和管理系统
-│   ├── config.py                  # 全局配置文件管理器
-│   ├── usage_statistics.py        # 用户统计和数据分析模块
-│   ├── simple_stats_server.py     # 简单统计服务器（可选）
-│   ├── build_binary_module.py     # 二进制模块编译脚本（Nuitka编译工具）
-│   ├── secure_confirm_ultra.py    # 自动确认发货模块（多层加密保护）
-│   ├── secure_confirm_decrypted.py # 自动确认发货模块（解密版本）
-│   ├── secure_freeshipping_ultra.py # 自动免拼发货模块（多层加密保护）
-│   └── secure_freeshipping_decrypted.py # 自动免拼发货模块（解密版本）
-├── 🛠️ 工具模块
-│   └── utils/
-│       ├── xianyu_utils.py        # 闲鱼API工具函数（加密、签名、解析）
-│       ├── message_utils.py       # 消息格式化和处理工具
-│       ├── ws_utils.py            # WebSocket客户端封装
-│       ├── image_utils.py         # 图片处理和管理工具
-│       ├── image_uploader.py      # 图片上传到闲鱼CDN
-│       ├── image_utils.py         # 图片处理工具（压缩、格式转换）
-│       ├── item_search.py         # 商品搜索功能（基于Playwright，无头模式）
-│       ├── order_detail_fetcher.py # 订单详情获取工具
-│       └── qr_login.py            # 二维码登录功能
+├── 📄 核心代码
+│   └── app/
+│       ├── main.py                # 新的项目启动入口
+│       ├── core/
+│       │   └── config.py          # 全局配置管理器
+│       ├── api/
+│       │   ├── reply_server.py    # FastAPI Web服务器入口，负责装配路由
+│       │   └── routes/            # 按领域拆分的API路由模块
+│       │       ├── auth.py
+│       │       ├── messages.py
+│       │       ├── accounts.py
+│       │       ├── qr_login.py
+│       │       └── management.py
+│       ├── services/
+│       │   ├── cookie_manager.py  # 多账号Cookie管理和任务调度
+│       │   ├── xianyu_async.py    # 闲鱼WebSocket连接和消息处理核心
+│       │   ├── file_log_collector.py # 实时日志收集和管理系统
+│       │   ├── ai_reply.py        # AI智能回复引擎，支持多种AI模型
+│       │   ├── order_status.py    # 订单状态处理和更新模块
+│       │   └── usage_stats.py     # 用户统计与数据上报模块
+│       ├── repositories/
+│       │   └── db_manager.py      # SQLite数据库管理，支持多用户数据隔离
+│       └── utils/
+│           ├── xianyu_utils.py    # 闲鱼API工具函数（加密、签名、解析）
+│           ├── message_utils.py   # 消息格式化和处理工具
+│           ├── ws_utils.py        # WebSocket客户端封装
+│           ├── image_utils.py     # 图片处理和管理工具
+│           ├── image_uploader.py  # 图片上传到闲鱼CDN
+│           ├── item_search.py     # 商品搜索功能（基于Playwright，无头模式）
+│           ├── order_detail_fetcher.py # 订单详情获取工具
+│           └── qr_login.py        # 二维码登录功能
 ├── 🌐 前端界面
 │   └── static/
 │       ├── index.html             # 主管理界面（集成所有功能模块）
@@ -183,6 +186,10 @@ xianyu-auto-reply/
 │   ├── requirements.txt          # Python依赖包列表（精简版，无内置模块）
 │   ├── .gitignore                # Git忽略文件配置（完整版）
 │   └── README.md                 # 项目说明文档（本文件）
+├── 📜 兼容入口
+│   └── Start.py                  # 兼容旧启动命令，内部调用 app.main
+├── 📂 脚本工具
+│   └── scripts/                  # 二进制模块、统计服务等辅助脚本
 └── 📊 数据目录（运行时创建）
     ├── data/                     # 数据目录（Docker挂载，自动创建）
     │   ├── xianyu_data.db        # SQLite主数据库文件
@@ -555,23 +562,24 @@ CPU_LIMIT=2.0                          # CPU限制(核心数)
 ## 📁 核心文件功能说明
 
 ### 🚀 核心启动模块
-- **`Start.py`** - 项目启动入口，初始化CookieManager和FastAPI服务，从数据库加载账号任务并启动后台API服务，支持环境变量配置
-- **`XianyuAutoAsync.py`** - 闲鱼WebSocket连接核心，处理消息收发、自动回复、指定商品回复、自动发货、商品信息收集、AI回复
-- **`reply_server.py`** - FastAPI Web服务器，提供完整的管理界面和RESTful API接口，支持多用户系统、JWT认证、权限管理
-- **`cookie_manager.py`** - 多账号Cookie管理器，负责账号任务的启动、停止、状态管理和线程安全操作，支持数据库持久化
+- **`app/main.py`** - 新的项目启动入口，负责初始化CookieManager和FastAPI服务，从数据库加载账号任务并启动后台API服务
+- **`Start.py`** - 兼容旧版启动命令的适配层，内部调用 `app.main`
+- **`app/services/xianyu_async.py`** - 闲鱼WebSocket连接核心，处理消息收发、自动回复、指定商品回复、自动发货、商品信息收集、AI回复
+- **`app/api/reply_server.py`** - FastAPI Web服务器，提供完整的管理界面和RESTful API接口，支持多用户系统、JWT认证、权限管理
+- **`app/services/cookie_manager.py`** - 多账号Cookie管理器，负责账号任务的启动、停止、状态管理和线程安全操作，支持数据库持久化
 
 ### 🗄️ 数据和配置管理
-- **`db_manager.py`** - SQLite数据库管理器，支持多用户数据隔离、自动迁移、版本管理、完整的CRUD操作、邮箱验证、系统设置
-- **`config.py`** - 全局配置文件管理器，加载YAML配置和环境变量，提供配置项访问接口，支持动态配置更新
+- **`app/repositories/db_manager.py`** - SQLite数据库管理器，支持多用户数据隔离、自动迁移、版本管理、完整的CRUD操作、邮箱验证、系统设置
+- **`app/core/config.py`** - 全局配置文件管理器，加载YAML配置和环境变量，提供配置项访问接口，支持动态配置更新
 - **`global_config.yml`** - 全局配置文件，包含WebSocket、API、自动回复、AI、通知等所有系统配置项
 
 ### 🤖 智能功能模块
-- **`ai_reply_engine.py`** - AI智能回复引擎，支持OpenAI、通义千问等多种AI模型，意图识别、上下文管理、个性化回复
-- **`secure_confirm_ultra.py`** - 自动确认发货模块，采用多层加密保护，调用闲鱼API确认发货状态，支持锁机制防并发
-- **`secure_freeshipping_ultra.py`** - 自动免拼发货模块，支持批量处理、异常恢复、智能匹配、规格识别
-- **`file_log_collector.py`** - 实时日志收集器，提供Web界面日志查看、搜索、过滤、下载和管理功能
+- **`app/services/ai_reply.py`** - AI智能回复引擎，支持OpenAI、通义千问等多种AI模型，意图识别、上下文管理、个性化回复
+- **`scripts/secure_confirm_ultra.py`** - 自动确认发货模块（多层加密保护）
+- **`scripts/secure_freeshipping_ultra.py`** - 自动免拼发货模块（多层加密保护）
+- **`app/services/file_log_collector.py`** - 实时日志收集器，提供Web界面日志查看、搜索、过滤、下载和管理功能
 
-### 🛠️ 工具模块 (`utils/`)
+### 🛠️ 工具模块 (`app/utils/`)
 - **`xianyu_utils.py`** - 闲鱼API核心工具，包含加密算法、签名生成、数据解析、Cookie处理、请求封装
 - **`message_utils.py`** - 消息处理工具，格式化消息内容、变量替换、内容过滤、模板渲染、表情处理
 - **`ws_utils.py`** - WebSocket客户端封装，处理连接管理、心跳检测、重连机制、消息队列、异常恢复

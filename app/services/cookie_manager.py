@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 from typing import Dict, List, Tuple, Optional
 from loguru import logger
-from db_manager import db_manager
+from app.repositories.db_manager import db_manager
 
 __all__ = ["CookieManager", "manager"]
 
@@ -62,7 +62,7 @@ class CookieManager:
 
         try:
             logger.info(f"【{cookie_id}】正在导入XianyuLive...")
-            from XianyuAutoAsync import XianyuLive  # 延迟导入，避免循环
+            from app.services.xianyu_async import XianyuLive  # 延迟导入，避免循环
             logger.info(f"【{cookie_id}】XianyuLive导入成功")
 
             logger.info(f"【{cookie_id}】开始创建XianyuLive实例...")

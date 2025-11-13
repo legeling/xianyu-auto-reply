@@ -3,153 +3,178 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>闲鱼自动回复管理系统</title>
+  <title>闲鱼助手 - 简洁优雅版</title>
   <link rel="stylesheet" href="/static/lib/bootstrap/bootstrap.min.css">
   <link rel="stylesheet" href="/static/lib/bootstrap-icons/bootstrap-icons.css">
-  
-  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/app-theme.css">
 </head>
 <body>
-  <!-- 移动端菜单切换按钮 -->
-  <button class="mobile-toggle" onclick="toggleSidebar()">
-    <i class="bi bi-list"></i>
-  </button>
-
-  <!-- 侧边栏 -->
-  <div class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <a href="#" class="sidebar-brand">
-        <i class="bi bi-chat-dots-fill me-2"></i>
-        闲鱼管理系统
-      </a>
-    </div>
-    <nav class="sidebar-nav">
-      <div class="nav-item">
-        <a href="#" class="nav-link active" onclick="showSection('dashboard')">
-          <i class="bi bi-speedometer2"></i>
-          仪表盘
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <a href="#" class="brand">
+          <span class="brand-icon">
+            <i class="bi bi-chat-dots-fill"></i>
+          </span>
+          <span>闲鱼助手</span>
         </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('accounts')">
-          <i class="bi bi-person-circle"></i>
-          账号管理
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('items')">
-          <i class="bi bi-box-seam"></i>
-          商品管理
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('orders')">
-          <i class="bi bi-receipt-cutoff"></i>
-          订单管理
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('auto-reply')">
-          <i class="bi bi-chat-left-text"></i>
-          自动回复
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('items-reply')">
-          <i class="bi bi-chat-left-text"></i>
-          指定商品回复
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('cards')">
-          <i class="bi bi-credit-card"></i>
-          卡券管理
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('auto-delivery')">
-          <i class="bi bi-truck"></i>
-          自动发货
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('notification-channels')">
-          <i class="bi bi-bell"></i>
-          通知渠道
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('message-notifications')">
-          <i class="bi bi-chat-dots"></i>
-          消息通知
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('item-search')">
-          <i class="bi bi-search"></i>
-          商品搜索
-        </a>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('system-settings')">
-          <i class="bi bi-gear"></i>
-          系统设置
-        </a>
-      </div>
-
-      <!-- 管理员专用菜单 -->
-      <div id="adminMenuSection" style="display: none;">
-        <div class="nav-divider mt-3 mb-2">
-          <small class="text-white-50">管理员功能</small>
+        <div class="chip muted">
+          <i class="bi bi-shield-check"></i>
+          企业级运营面板
         </div>
-        <div class="nav-item">
-          <a href="#" class="nav-link" onclick="showSection('user-management')">
-            <i class="bi bi-people"></i>
-            用户管理
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <h6>工作台</h6>
+          <a href="#" class="nav-link active" onclick="showSection('dashboard')">
+            <i class="bi bi-speedometer2"></i>
+            仪表盘
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('accounts')">
+            <i class="bi bi-person-circle"></i>
+            账号管理
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('items')">
+            <i class="bi bi-box-seam"></i>
+            商品管理
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('orders')">
+            <i class="bi bi-receipt-cutoff"></i>
+            订单管理
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('auto-reply')">
+            <i class="bi bi-chat-left-text"></i>
+            自动回复
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('items-reply')">
+            <i class="bi bi-chat-square-dots"></i>
+            指定商品回复
           </a>
         </div>
-        <div class="nav-item">
-          <a href="#" class="nav-link" onclick="showSection('logs')">
-            <i class="bi bi-file-text-fill"></i>
-            系统日志
+
+        <div class="nav-section">
+          <h6>运营工具</h6>
+          <a href="#" class="nav-link" onclick="showSection('cards')">
+            <i class="bi bi-credit-card"></i>
+            卡券管理
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('auto-delivery')">
+            <i class="bi bi-truck"></i>
+            自动发货
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('notification-channels')">
+            <i class="bi bi-bell"></i>
+            通知渠道
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('message-notifications')">
+            <i class="bi bi-megaphone"></i>
+            消息通知
+          </a>
+          <a href="#" class="nav-link" onclick="showSection('item-search')">
+            <i class="bi bi-search"></i>
+            商品搜索
           </a>
         </div>
-        <div class="nav-item">
-          <a href="#" class="nav-link" onclick="showSection('risk-control-logs')">
-            <i class="bi bi-shield-exclamation"></i>
-            风控日志
+
+        <div class="nav-section">
+          <h6>系统</h6>
+          <a href="#" class="nav-link" onclick="showSection('system-settings')">
+            <i class="bi bi-gear"></i>
+            系统设置
+          </a>
+          <div id="adminMenuSection" style="display:none;">
+            <a href="#" class="nav-link" onclick="showSection('user-management')">
+              <i class="bi bi-people"></i>
+              用户管理
+            </a>
+            <a href="#" class="nav-link" onclick="showSection('logs')">
+              <i class="bi bi-journal-text"></i>
+              系统日志
+            </a>
+            <a href="#" class="nav-link" onclick="showSection('risk-control-logs')">
+              <i class="bi bi-shield-exclamation"></i>
+              风控日志
+            </a>
+            <a href="#" class="nav-link" onclick="showSection('data-management')">
+              <i class="bi bi-database"></i>
+              数据管理
+            </a>
+          </div>
+          <a href="#" class="nav-link" onclick="showSection('about')">
+            <i class="bi bi-info-circle"></i>
+            关于
           </a>
         </div>
-        <div class="nav-item">
-          <a href="#" class="nav-link" onclick="showSection('data-management')">
-            <i class="bi bi-database"></i>
-            数据管理
+
+        <div class="nav-section">
+          <h6>快捷</h6>
+          <a href="#" class="nav-link" onclick="logout()">
+            <i class="bi bi-box-arrow-right"></i>
+            退出登录
           </a>
         </div>
-      </div>
+      </nav>
+    </aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar(false)"></div>
 
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="showSection('about')">
-          <i class="bi bi-info-circle"></i>
-          关于
-        </a>
-      </div>
+    <main class="app-main">
+      <header class="header">
+        <button class="mobile-trigger mobile-toggle" id="sidebarTrigger" onclick="toggleSidebar()" aria-label="切换菜单">
+          <i class="bi bi-list"></i>
+        </button>
 
-      <!-- 底部分隔符 -->
-      <div class="nav-divider mt-3 mb-2">
-        <small class="text-white-50">系统操作</small>
-      </div>
-      <div class="nav-item">
-        <a href="#" class="nav-link" onclick="logout()">
-          <i class="bi bi-box-arrow-right"></i>
-          登出
-        </a>
-      </div>
-    </nav>
-  </div>
+        <div class="welcome-summary">
+          <h1 class="muted" id="welcomeMessage">欢迎回来，掌控闲鱼业务</h1>
+          <div class="chip-inline" id="accountSummary">
+            <i class="bi bi-lightning-charge"></i>
+            正在载入账户概览…
+          </div>
+        </div>
 
-  <!-- 主内容区域 -->
-  <div class="main-content">
+        <div class="header-actions">
+          <button class="theme-toggle" id="themeToggle" title="切换主题">
+            <i class="bi bi-sun-fill"></i>
+            <span>浅色模式</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="content">
+        <section class="welcome-panel" id="dashboardIntro">
+          <h1>智能闲鱼运营中心</h1>
+          <p>实时掌握商品、订单、回复任务，支撑自运营与团队协作，一站式处理所有核心业务。</p>
+          <div class="welcome-meta">
+            <span class="chip"><i class="bi bi-clock-history"></i><span id="welcomeTime">--:--</span></span>
+            <span class="chip"><i class="bi bi-shield-lock"></i> 多层加密安全保护</span>
+            <span class="chip"><i class="bi bi-lightning"></i> 异步高并发架构</span>
+          </div>
+        </section>
+
+        <section class="stats-grid" id="dashboardStats">
+          <article class="stat-card">
+            <div class="stat-card__label">绑定账号</div>
+            <div class="stat-card__value" id="statsAccounts">--</div>
+            <div class="muted">已接入的闲鱼账号总数</div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-card__label">关键词总量</div>
+            <div class="stat-card__value" id="statsKeywords">--</div>
+            <div class="muted">自动回复关键词覆盖范围</div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-card__label">启用账号</div>
+            <div class="stat-card__value" id="statsActive">--</div>
+            <div class="muted">当前正在运行的账号数量</div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-card__label">待处理订单</div>
+            <div class="stat-card__value" id="statsOrders">--</div>
+            <div class="muted">自动发货队列实时概况</div>
+          </article>
+        </section>
+
+        <!-- 原有内容结构保留，只调整容器样式 -->
     <!-- 仪表盘内容 -->
     <div id="dashboard-section" class="content-section active">
       <div class="content-header">
@@ -3016,6 +3041,8 @@
 
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
+  <script src="/static/js/theme-toggle.js"></script>
+  <script src="/static/js/responsive.js"></script>
   <script src="/static/js/app.js?v=2.2.0"></script>
 
   <!-- 默认回复管理模态框 -->
@@ -3339,7 +3366,9 @@
         </div>
       </div>
     </div>
-  </div>
+    </section>
+  </main>
+</div>
 
   <!-- 导入关键词模态框 -->
   <div class="modal fade" id="importKeywordsModal" tabindex="-1">

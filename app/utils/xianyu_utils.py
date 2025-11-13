@@ -6,6 +6,7 @@ import time
 import hashlib
 import struct
 import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 import blackboxprotobuf
@@ -14,12 +15,11 @@ from loguru import logger
 subprocess.Popen = partial(subprocess.Popen, encoding="utf-8")
 import execjs
 
-def get_js_path():
+
+def get_js_path() -> Path:
     """获取JavaScript文件的路径"""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.dirname(current_dir)
-    js_path = os.path.join(root_dir, 'static', 'xianyu_js_version_2.js')
-    return js_path
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / 'static' / 'xianyu_js_version_2.js'
 
 try:
     # 检查JavaScript运行时是否可用
@@ -30,7 +30,8 @@ try:
     current_runtime = execjs.get()
     logger.info(f"当前JavaScript运行时: {current_runtime.name}")
 
-    xianyu_js = execjs.compile(open(get_js_path(), 'r', encoding='utf-8').read())
+    js_path = get_js_path()
+    xianyu_js = execjs.compile(js_path.read_text(encoding='utf-8'))
     logger.info("JavaScript文件加载成功")
 except Exception as e:
     error_msg = str(e)

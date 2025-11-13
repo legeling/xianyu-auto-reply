@@ -1,7 +1,7 @@
 import asyncio
 import time
 from loguru import logger
-from utils.xianyu_utils import trans_cookies, generate_sign
+from app.utils.xianyu_utils import trans_cookies, generate_sign
 
 
 class SecureFreeshipping:
@@ -26,7 +26,7 @@ class SecureFreeshipping:
     async def update_config_cookies(self):
         """更新数据库中的cookies"""
         try:
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
             
             # 更新数据库中的Cookie
             db_manager.update_config_cookies(self.cookie_id, self.cookies_str)

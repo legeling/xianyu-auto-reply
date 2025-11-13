@@ -1,1054 +1,39 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import List, Tuple, Optional, Dict, Any
-from pathlib import Path
-from urllib.parse import unquote
-import hashlib
-import secrets
-import time
+"""业务管理相关的大部分路由（通知、系统、关键词、商品、日志、管理员等）。"""
+
+from __future__ import annotations
+
+import glob
+import io
 import json
 import os
-import uvicorn
+import shutil
+import sqlite3
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-import io
-import asyncio
-from collections import defaultdict
-
-import cookie_manager
-from db_manager import db_manager
-from file_log_collector import setup_file_logging, get_file_log_collector
-from ai_reply_engine import ai_reply_engine
-from utils.qr_login import qr_login_manager
-from utils.xianyu_utils import trans_cookies
-from utils.image_utils import image_manager
-
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from loguru import logger
-
-# 关键字文件路径
-KEYWORDS_FILE = Path(__file__).parent / "回复关键字.txt"
-
-# 简单的用户认证配置
-ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123"  # 系统初始化时的默认密码
-SESSION_TOKENS = {}  # 存储会话token: {token: {'user_id': int, 'username': str, 'timestamp': float}}
-TOKEN_EXPIRE_TIME = 24 * 60 * 60  # token过期时间：24小时
-
-# HTTP Bearer认证
-security = HTTPBearer(auto_error=False)
-
-# 扫码登录检查锁 - 防止并发处理同一个session
-qr_check_locks = defaultdict(lambda: asyncio.Lock())
-qr_check_processed = {}  # 记录已处理的session: {session_id: {'processed': bool, 'timestamp': float}}
-
-# 不再需要单独的密码初始化，由数据库初始化时处理
-
-
-def cleanup_qr_check_records():
-    """清理过期的扫码检查记录"""
-    current_time = time.time()
-    expired_sessions = []
-
-    for session_id, record in qr_check_processed.items():
-        # 清理超过1小时的记录
-        if current_time - record['timestamp'] > 3600:
-            expired_sessions.append(session_id)
-
-    for session_id in expired_sessions:
-        if session_id in qr_check_processed:
-            del qr_check_processed[session_id]
-        if session_id in qr_check_locks:
-            del qr_check_locks[session_id]
-
-
-def load_keywords() -> List[Tuple[str, str]]:
-    """读取关键字→回复映射表
-
-    文件格式支持：
-        关键字<空格/制表符/冒号>回复内容
-    忽略空行和以 # 开头的注释行
-    """
-    mapping: List[Tuple[str, str]] = []
-    if not KEYWORDS_FILE.exists():
-        return mapping
-
-    with KEYWORDS_FILE.open('r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            # 尝试用\t、空格、冒号分隔
-            if '\t' in line:
-                key, reply = line.split('\t', 1)
-            elif ' ' in line:
-                key, reply = line.split(' ', 1)
-            elif ':' in line:
-                key, reply = line.split(':', 1)
-            else:
-                # 无法解析的行，跳过
-                continue
-            mapping.append((key.strip(), reply.strip()))
-    return mapping
-
-
-KEYWORDS_MAPPING = load_keywords()
-
-
-# 认证相关模型
-class LoginRequest(BaseModel):
-    username: Optional[str] = None
-    password: Optional[str] = None
-    email: Optional[str] = None
-    verification_code: Optional[str] = None
-
-
-class LoginResponse(BaseModel):
-    success: bool
-    token: Optional[str] = None
-    message: str
-    user_id: Optional[int] = None
-    username: Optional[str] = None
-    is_admin: Optional[bool] = None
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
-
-
-class RegisterRequest(BaseModel):
-    username: str
-    email: str
-    password: str
-    verification_code: str
-
-
-class RegisterResponse(BaseModel):
-    success: bool
-    message: str
-
-
-class SendCodeRequest(BaseModel):
-    email: str
-    session_id: Optional[str] = None
-    type: Optional[str] = 'register'  # 'register' 或 'login'
-
-
-class SendCodeResponse(BaseModel):
-    success: bool
-    message: str
-
-
-class CaptchaRequest(BaseModel):
-    session_id: str
-
-
-class CaptchaResponse(BaseModel):
-    success: bool
-    captcha_image: str
-    session_id: str
-    message: str
-
-
-class VerifyCaptchaRequest(BaseModel):
-    session_id: str
-    captcha_code: str
-
-
-class VerifyCaptchaResponse(BaseModel):
-    success: bool
-    message: str
-
-
-def generate_token() -> str:
-    """生成随机token"""
-    return secrets.token_urlsafe(32)
-
-
-def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[Dict[str, Any]]:
-    """验证token并返回用户信息"""
-    if not credentials:
-        return None
-
-    token = credentials.credentials
-    if token not in SESSION_TOKENS:
-        return None
-
-    token_data = SESSION_TOKENS[token]
-
-    # 检查token是否过期
-    if time.time() - token_data['timestamp'] > TOKEN_EXPIRE_TIME:
-        del SESSION_TOKENS[token]
-        return None
-
-    return token_data
-
-
-def verify_admin_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
-    """验证管理员token"""
-    user_info = verify_token(credentials)
-    if not user_info:
-        raise HTTPException(status_code=401, detail="未授权访问")
-
-    # 检查是否是管理员
-    if user_info['username'] != ADMIN_USERNAME:
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-
-    return user_info
-
-
-def require_auth(user_info: Optional[Dict[str, Any]] = Depends(verify_token)):
-    """需要认证的依赖，返回用户信息"""
-    if not user_info:
-        raise HTTPException(status_code=401, detail="未授权访问")
-    return user_info
-
-
-def get_current_user(user_info: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
-    """获取当前登录用户信息"""
-    return user_info
-
-
-def get_current_user_optional(user_info: Optional[Dict[str, Any]] = Depends(verify_token)) -> Optional[Dict[str, Any]]:
-    """获取当前用户信息（可选，不强制要求登录）"""
-    return user_info
-
-
-def get_user_log_prefix(user_info: Dict[str, Any] = None) -> str:
-    """获取用户日志前缀"""
-    if user_info:
-        return f"【{user_info['username']}#{user_info['user_id']}】"
-    return "【系统】"
-
-
-def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    """要求管理员权限"""
-    if current_user['username'] != 'admin':
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return current_user
-
-
-def log_with_user(level: str, message: str, user_info: Dict[str, Any] = None):
-    """带用户信息的日志记录"""
-    prefix = get_user_log_prefix(user_info)
-    full_message = f"{prefix} {message}"
-
-    if level.lower() == 'info':
-        logger.info(full_message)
-    elif level.lower() == 'error':
-        logger.error(full_message)
-    elif level.lower() == 'warning':
-        logger.warning(full_message)
-    elif level.lower() == 'debug':
-        logger.debug(full_message)
-    else:
-        logger.info(full_message)
-
-
-def match_reply(cookie_id: str, message: str) -> Optional[str]:
-    """根据 cookie_id 及消息内容匹配回复
-    只有启用的账号才会匹配关键字回复
-    """
-    mgr = cookie_manager.manager
-    if mgr is None:
-        return None
-
-    # 检查账号是否启用
-    if not mgr.get_cookie_status(cookie_id):
-        return None  # 禁用的账号不参与自动回复
-
-    # 优先账号级关键字
-    if mgr.get_keywords(cookie_id):
-        for k, r in mgr.get_keywords(cookie_id):
-            if k in message:
-                return r
-
-    # 全局关键字
-    for k, r in KEYWORDS_MAPPING:
-        if k in message:
-            return r
-    return None
-
-
-class RequestModel(BaseModel):
-    cookie_id: str
-    msg_time: str
-    user_url: str
-    send_user_id: str
-    send_user_name: str
-    item_id: str
-    send_message: str
-    chat_id: str
-
-
-class ResponseData(BaseModel):
-    send_msg: str
-
-
-class ResponseModel(BaseModel):
-    code: int
-    data: ResponseData
-
-
-app = FastAPI(
-    title="Xianyu Auto Reply API",
-    version="1.0.0",
-    description="闲鱼自动回复系统API",
-    docs_url="/docs",
-    redoc_url="/redoc"
+from pydantic import BaseModel
+
+from app.api.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    log_with_user,
+    require_auth,
+    require_admin,
 )
-
-# 初始化文件日志收集器
-setup_file_logging()
-
-# 添加一条测试日志
-from loguru import logger
-logger.info("Web服务器启动，文件日志收集器已初始化")
-
-# 添加请求日志中间件
-@app.middleware("http")
-async def log_requests(request, call_next):
-    start_time = time.time()
-
-    # 获取用户信息
-    user_info = "未登录"
-    try:
-        # 从请求头中获取Authorization
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
-            if token in SESSION_TOKENS:
-                token_data = SESSION_TOKENS[token]
-                # 检查token是否过期
-                if time.time() - token_data['timestamp'] <= TOKEN_EXPIRE_TIME:
-                    user_info = f"【{token_data['username']}#{token_data['user_id']}】"
-    except Exception:
-        pass
-
-    logger.info(f"🌐 {user_info} API请求: {request.method} {request.url.path}")
-
-    response = await call_next(request)
-
-    process_time = time.time() - start_time
-    logger.info(f"✅ {user_info} API响应: {request.method} {request.url.path} - {response.status_code} ({process_time:.3f}s)")
-
-    return response
-
-# 提供前端静态文件
-import os
-static_dir = os.path.join(os.path.dirname(__file__), 'static')
-if not os.path.exists(static_dir):
-    os.makedirs(static_dir, exist_ok=True)
-
-app.mount('/static', StaticFiles(directory=static_dir), name='static')
-
-# 确保图片上传目录存在
-uploads_dir = os.path.join(static_dir, 'uploads', 'images')
-if not os.path.exists(uploads_dir):
-    os.makedirs(uploads_dir, exist_ok=True)
-    logger.info(f"创建图片上传目录: {uploads_dir}")
-
-# 健康检查端点
-@app.get('/health')
-async def health_check():
-    """健康检查端点，用于Docker健康检查和负载均衡器"""
-    try:
-        # 检查Cookie管理器状态
-        manager_status = "ok" if cookie_manager.manager is not None else "error"
-
-        # 检查数据库连接
-        from db_manager import db_manager
-        try:
-            db_manager.get_all_cookies()
-            db_status = "ok"
-        except Exception:
-            db_status = "error"
-
-        # 获取系统状态
-        import psutil
-        cpu_percent = psutil.cpu_percent(interval=1)
-        memory_info = psutil.virtual_memory()
-
-        status = {
-            "status": "healthy" if manager_status == "ok" and db_status == "ok" else "unhealthy",
-            "timestamp": time.time(),
-            "services": {
-                "cookie_manager": manager_status,
-                "database": db_status
-            },
-            "system": {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory_info.percent,
-                "memory_available": memory_info.available
-            }
-        }
-
-        if status["status"] == "unhealthy":
-            raise HTTPException(status_code=503, detail=status)
-
-        return status
-
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "timestamp": time.time(),
-            "error": str(e)
-        }
-
-
-# 重定向根路径到登录页面
-@app.get('/', response_class=HTMLResponse)
-async def root():
-    login_path = os.path.join(static_dir, 'login.html')
-    if os.path.exists(login_path):
-        with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Login page not found</h3>')
-
-
-# 登录页面路由
-@app.get('/login.html', response_class=HTMLResponse)
-async def login_page():
-    login_path = os.path.join(static_dir, 'login.html')
-    if os.path.exists(login_path):
-        with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Login page not found</h3>')
-
-
-# 注册页面路由
-@app.get('/register.html', response_class=HTMLResponse)
-async def register_page():
-    # 检查注册是否开启
-    from db_manager import db_manager
-    registration_enabled = db_manager.get_system_setting('registration_enabled')
-    if registration_enabled != 'true':
-        return HTMLResponse('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>注册已关闭</title>
-            <meta charset="utf-8">
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .message { color: #666; font-size: 18px; }
-                .back-link { margin-top: 20px; }
-                .back-link a { color: #007bff; text-decoration: none; }
-            </style>
-        </head>
-        <body>
-            <h2>🚫 注册功能已关闭</h2>
-            <p class="message">系统管理员已关闭用户注册功能</p>
-            <div class="back-link">
-                <a href="/">← 返回首页</a>
-            </div>
-        </body>
-        </html>
-        ''', status_code=403)
-
-    register_path = os.path.join(static_dir, 'register.html')
-    if os.path.exists(register_path):
-        with open(register_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Register page not found</h3>')
-
-
-# 管理页面（不需要服务器端认证，由前端JavaScript处理）
-@app.get('/admin', response_class=HTMLResponse)
-async def admin_page():
-    index_path = os.path.join(static_dir, 'index.html')
-    if not os.path.exists(index_path):
-        return HTMLResponse('<h3>No front-end found</h3>')
-    with open(index_path, 'r', encoding='utf-8') as f:
-        return HTMLResponse(f.read())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# 登录接口
-@app.post('/login')
-async def login(request: LoginRequest):
-    from db_manager import db_manager
-
-    # 判断登录方式
-    if request.username and request.password:
-        # 用户名/密码登录
-        logger.info(f"【{request.username}】尝试用户名登录")
-
-        # 统一使用用户表验证（包括admin用户）
-        if db_manager.verify_user_password(request.username, request.password):
-            user = db_manager.get_user_by_username(request.username)
-            if user:
-                # 生成token
-                token = generate_token()
-                SESSION_TOKENS[token] = {
-                    'user_id': user['id'],
-                    'username': user['username'],
-                    'timestamp': time.time()
-                }
-
-                # 区分管理员和普通用户的日志
-                if user['username'] == ADMIN_USERNAME:
-                    logger.info(f"【{user['username']}#{user['id']}】登录成功（管理员）")
-                else:
-                    logger.info(f"【{user['username']}#{user['id']}】登录成功")
-
-                return LoginResponse(
-                    success=True,
-                    token=token,
-                    message="登录成功",
-                    user_id=user['id'],
-                    username=user['username'],
-                    is_admin=(user['username'] == ADMIN_USERNAME)
-                )
-
-        logger.warning(f"【{request.username}】登录失败：用户名或密码错误")
-        return LoginResponse(
-            success=False,
-            message="用户名或密码错误"
-        )
-
-    elif request.email and request.password:
-        # 邮箱/密码登录
-        logger.info(f"【{request.email}】尝试邮箱密码登录")
-
-        user = db_manager.get_user_by_email(request.email)
-        if user and db_manager.verify_user_password(user['username'], request.password):
-            # 生成token
-            token = generate_token()
-            SESSION_TOKENS[token] = {
-                'user_id': user['id'],
-                'username': user['username'],
-                'timestamp': time.time()
-            }
-
-            logger.info(f"【{user['username']}#{user['id']}】邮箱登录成功")
-
-            return LoginResponse(
-                success=True,
-                token=token,
-                message="登录成功",
-                user_id=user['id'],
-                username=user['username'],
-                is_admin=(user['username'] == ADMIN_USERNAME)
-            )
-
-        logger.warning(f"【{request.email}】邮箱登录失败：邮箱或密码错误")
-        return LoginResponse(
-            success=False,
-            message="邮箱或密码错误"
-        )
-
-    elif request.email and request.verification_code:
-        # 邮箱/验证码登录
-        logger.info(f"【{request.email}】尝试邮箱验证码登录")
-
-        # 验证邮箱验证码
-        if not db_manager.verify_email_code(request.email, request.verification_code, 'login'):
-            logger.warning(f"【{request.email}】验证码登录失败：验证码错误或已过期")
-            return LoginResponse(
-                success=False,
-                message="验证码错误或已过期"
-            )
-
-        # 获取用户信息
-        user = db_manager.get_user_by_email(request.email)
-        if not user:
-            logger.warning(f"【{request.email}】验证码登录失败：用户不存在")
-            return LoginResponse(
-                success=False,
-                message="用户不存在"
-            )
-
-        # 生成token
-        token = generate_token()
-        SESSION_TOKENS[token] = {
-            'user_id': user['id'],
-            'username': user['username'],
-            'timestamp': time.time()
-        }
-
-        logger.info(f"【{user['username']}#{user['id']}】验证码登录成功")
-
-        return LoginResponse(
-            success=True,
-            token=token,
-            message="登录成功",
-            user_id=user['id'],
-            username=user['username'],
-            is_admin=(user['username'] == ADMIN_USERNAME)
-        )
-
-    else:
-        return LoginResponse(
-            success=False,
-            message="请提供有效的登录信息"
-        )
-
-
-# 验证token接口
-@app.get('/verify')
-async def verify(user_info: Optional[Dict[str, Any]] = Depends(verify_token)):
-    if user_info:
-        return {
-            "authenticated": True,
-            "user_id": user_info['user_id'],
-            "username": user_info['username'],
-            "is_admin": user_info['username'] == ADMIN_USERNAME
-        }
-    return {"authenticated": False}
-
-
-# 登出接口
-@app.post('/logout')
-async def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    if credentials and credentials.credentials in SESSION_TOKENS:
-        del SESSION_TOKENS[credentials.credentials]
-    return {"message": "已登出"}
-
-
-# 修改管理员密码接口
-@app.post('/change-admin-password')
-async def change_admin_password(request: ChangePasswordRequest, admin_user: Dict[str, Any] = Depends(verify_admin_token)):
-    from db_manager import db_manager
-
-    try:
-        # 验证当前密码（使用用户表验证）
-        if not db_manager.verify_user_password('admin', request.current_password):
-            return {"success": False, "message": "当前密码错误"}
-
-        # 更新密码（使用用户表更新）
-        success = db_manager.update_user_password('admin', request.new_password)
-
-        if success:
-            logger.info(f"【admin#{admin_user['user_id']}】管理员密码修改成功")
-            return {"success": True, "message": "密码修改成功"}
-        else:
-            return {"success": False, "message": "密码修改失败"}
-
-    except Exception as e:
-        logger.error(f"修改管理员密码异常: {e}")
-        return {"success": False, "message": "系统错误"}
-
-
-# 生成图形验证码接口
-@app.post('/generate-captcha')
-async def generate_captcha(request: CaptchaRequest):
-    from db_manager import db_manager
-
-    try:
-        # 生成图形验证码
-        captcha_text, captcha_image = db_manager.generate_captcha()
-
-        if not captcha_image:
-            return CaptchaResponse(
-                success=False,
-                captcha_image="",
-                session_id=request.session_id,
-                message="图形验证码生成失败"
-            )
-
-        # 保存验证码到数据库
-        if db_manager.save_captcha(request.session_id, captcha_text):
-            return CaptchaResponse(
-                success=True,
-                captcha_image=captcha_image,
-                session_id=request.session_id,
-                message="图形验证码生成成功"
-            )
-        else:
-            return CaptchaResponse(
-                success=False,
-                captcha_image="",
-                session_id=request.session_id,
-                message="图形验证码保存失败"
-            )
-
-    except Exception as e:
-        logger.error(f"生成图形验证码失败: {e}")
-        return CaptchaResponse(
-            success=False,
-            captcha_image="",
-            session_id=request.session_id,
-            message="图形验证码生成失败"
-        )
-
-
-# 验证图形验证码接口
-@app.post('/verify-captcha')
-async def verify_captcha(request: VerifyCaptchaRequest):
-    from db_manager import db_manager
-
-    try:
-        if db_manager.verify_captcha(request.session_id, request.captcha_code):
-            return VerifyCaptchaResponse(
-                success=True,
-                message="图形验证码验证成功"
-            )
-        else:
-            return VerifyCaptchaResponse(
-                success=False,
-                message="图形验证码错误或已过期"
-            )
-
-    except Exception as e:
-        logger.error(f"验证图形验证码失败: {e}")
-        return VerifyCaptchaResponse(
-            success=False,
-            message="图形验证码验证失败"
-        )
-
-
-# 发送验证码接口（需要先验证图形验证码）
-@app.post('/send-verification-code')
-async def send_verification_code(request: SendCodeRequest):
-    from db_manager import db_manager
-
-    try:
-        # 检查是否已验证图形验证码
-        # 通过检查数据库中是否存在已验证的图形验证码记录
-        with db_manager.lock:
-            cursor = db_manager.conn.cursor()
-            current_time = time.time()
-
-            # 查找最近5分钟内该session_id的验证记录
-            # 由于验证成功后验证码会被删除，我们需要另一种方式来跟踪验证状态
-            # 这里我们检查该session_id是否在最近验证过（通过检查是否有已删除的记录）
-
-            # 为了简化，我们要求前端在验证图形验证码成功后立即发送邮件验证码
-            # 或者我们可以在验证成功后设置一个临时标记
-            pass
-
-        # 根据验证码类型进行不同的检查
-        if request.type == 'register':
-            # 注册验证码：检查邮箱是否已注册
-            existing_user = db_manager.get_user_by_email(request.email)
-            if existing_user:
-                return SendCodeResponse(
-                    success=False,
-                    message="该邮箱已被注册"
-                )
-        elif request.type == 'login':
-            # 登录验证码：检查邮箱是否存在
-            existing_user = db_manager.get_user_by_email(request.email)
-            if not existing_user:
-                return SendCodeResponse(
-                    success=False,
-                    message="该邮箱未注册"
-                )
-
-        # 生成验证码
-        code = db_manager.generate_verification_code()
-
-        # 保存验证码到数据库
-        if not db_manager.save_verification_code(request.email, code, request.type):
-            return SendCodeResponse(
-                success=False,
-                message="验证码保存失败，请稍后重试"
-            )
-
-        # 发送验证码邮件
-        if await db_manager.send_verification_email(request.email, code):
-            return SendCodeResponse(
-                success=True,
-                message="验证码已发送到您的邮箱，请查收"
-            )
-        else:
-            return SendCodeResponse(
-                success=False,
-                message="验证码发送失败，请检查邮箱地址或稍后重试"
-            )
-
-    except Exception as e:
-        logger.error(f"发送验证码失败: {e}")
-        return SendCodeResponse(
-            success=False,
-            message="发送验证码失败，请稍后重试"
-        )
-
-
-# 用户注册接口
-@app.post('/register')
-async def register(request: RegisterRequest):
-    from db_manager import db_manager
-
-    # 检查注册是否开启
-    registration_enabled = db_manager.get_system_setting('registration_enabled')
-    if registration_enabled != 'true':
-        logger.warning(f"【{request.username}】注册失败: 注册功能已关闭")
-        return RegisterResponse(
-            success=False,
-            message="注册功能已关闭，请联系管理员"
-        )
-
-    try:
-        logger.info(f"【{request.username}】尝试注册，邮箱: {request.email}")
-
-        # 验证邮箱验证码
-        if not db_manager.verify_email_code(request.email, request.verification_code):
-            logger.warning(f"【{request.username}】注册失败: 验证码错误或已过期")
-            return RegisterResponse(
-                success=False,
-                message="验证码错误或已过期"
-            )
-
-        # 检查用户名是否已存在
-        existing_user = db_manager.get_user_by_username(request.username)
-        if existing_user:
-            logger.warning(f"【{request.username}】注册失败: 用户名已存在")
-            return RegisterResponse(
-                success=False,
-                message="用户名已存在"
-            )
-
-        # 检查邮箱是否已注册
-        existing_email = db_manager.get_user_by_email(request.email)
-        if existing_email:
-            logger.warning(f"【{request.username}】注册失败: 邮箱已被注册")
-            return RegisterResponse(
-                success=False,
-                message="该邮箱已被注册"
-            )
-
-        # 创建用户
-        if db_manager.create_user(request.username, request.email, request.password):
-            logger.info(f"【{request.username}】注册成功")
-            return RegisterResponse(
-                success=True,
-                message="注册成功，请登录"
-            )
-        else:
-            logger.error(f"【{request.username}】注册失败: 数据库操作失败")
-            return RegisterResponse(
-                success=False,
-                message="注册失败，请稍后重试"
-            )
-
-    except Exception as e:
-        logger.error(f"【{request.username}】注册异常: {e}")
-        return RegisterResponse(
-            success=False,
-            message="注册失败，请稍后重试"
-        )
-
-
-# ------------------------- 发送消息接口 -------------------------
-
-# 固定的API秘钥（生产环境中应该从配置文件或环境变量读取）
-# 注意：现在从系统设置中读取QQ回复消息秘钥
-API_SECRET_KEY = "xianyu_api_secret_2024"  # 保留作为后备
-
-class SendMessageRequest(BaseModel):
-    api_key: str
-    cookie_id: str
-    chat_id: str
-    to_user_id: str
-    message: str
-
-
-class SendMessageResponse(BaseModel):
-    success: bool
-    message: str
-
-
-def verify_api_key(api_key: str) -> bool:
-    """验证API秘钥"""
-    try:
-        # 从系统设置中获取QQ回复消息秘钥
-        from db_manager import db_manager
-        qq_secret_key = db_manager.get_system_setting('qq_reply_secret_key')
-
-        # 如果系统设置中没有配置，使用默认值
-        if not qq_secret_key:
-            qq_secret_key = API_SECRET_KEY
-
-        return api_key == qq_secret_key
-    except Exception as e:
-        logger.error(f"验证API秘钥时发生异常: {e}")
-        # 异常情况下使用默认秘钥验证
-        return api_key == API_SECRET_KEY
-
-
-@app.post('/send-message', response_model=SendMessageResponse)
-async def send_message_api(request: SendMessageRequest):
-    """发送消息API接口（使用秘钥验证）"""
-    try:
-        # 清理所有参数中的换行符
-        def clean_param(param_str):
-            """清理参数中的换行符"""
-            if isinstance(param_str, str):
-                return param_str.replace('\\n', '').replace('\n', '')
-            return param_str
-
-        # 清理所有参数
-        cleaned_api_key = clean_param(request.api_key)
-        cleaned_cookie_id = clean_param(request.cookie_id)
-        cleaned_chat_id = clean_param(request.chat_id)
-        cleaned_to_user_id = clean_param(request.to_user_id)
-        cleaned_message = clean_param(request.message)
-
-        # 验证API秘钥不能为空
-        if not cleaned_api_key:
-            logger.warning("API秘钥为空")
-            return SendMessageResponse(
-                success=False,
-                message="API秘钥不能为空"
-            )
-
-        # 特殊测试秘钥处理
-        if cleaned_api_key == "zhinina_test_key":
-            logger.info("使用测试秘钥，直接返回成功")
-            return SendMessageResponse(
-                success=True,
-                message="接口验证成功"
-            )
-
-        # 验证API秘钥
-        if not verify_api_key(cleaned_api_key):
-            logger.warning(f"API秘钥验证失败: {cleaned_api_key}")
-            return SendMessageResponse(
-                success=False,
-                message="API秘钥验证失败"
-            )
-
-        # 验证必需参数不能为空
-        required_params = {
-            'cookie_id': cleaned_cookie_id,
-            'chat_id': cleaned_chat_id,
-            'to_user_id': cleaned_to_user_id,
-            'message': cleaned_message
-        }
-
-        for param_name, param_value in required_params.items():
-            if not param_value:
-                logger.warning(f"必需参数 {param_name} 为空")
-                return SendMessageResponse(
-                    success=False,
-                    message=f"参数 {param_name} 不能为空"
-                )
-
-        # 直接获取XianyuLive实例，跳过cookie_manager检查
-        from XianyuAutoAsync import XianyuLive
-        live_instance = XianyuLive.get_instance(cleaned_cookie_id)
-
-        if not live_instance:
-            logger.warning(f"账号实例不存在或未连接: {cleaned_cookie_id}")
-            return SendMessageResponse(
-                success=False,
-                message="账号实例不存在或未连接，请检查账号状态"
-            )
-
-        # 检查WebSocket连接状态
-        if not live_instance.ws or live_instance.ws.closed:
-            logger.warning(f"账号WebSocket连接已断开: {cleaned_cookie_id}")
-            return SendMessageResponse(
-                success=False,
-                message="账号WebSocket连接已断开，请等待重连"
-            )
-
-        # 发送消息（使用清理后的所有参数）
-        await live_instance.send_msg(
-            live_instance.ws,
-            cleaned_chat_id,
-            cleaned_to_user_id,
-            cleaned_message
-        )
-
-        logger.info(f"API成功发送消息: {cleaned_cookie_id} -> {cleaned_to_user_id}, 内容: {cleaned_message[:50]}{'...' if len(cleaned_message) > 50 else ''}")
-
-        return SendMessageResponse(
-            success=True,
-            message="消息发送成功"
-        )
-
-    except Exception as e:
-        # 使用清理后的参数记录日志
-        cookie_id_for_log = clean_param(request.cookie_id) if 'clean_param' in locals() else request.cookie_id
-        to_user_id_for_log = clean_param(request.to_user_id) if 'clean_param' in locals() else request.to_user_id
-        logger.error(f"API发送消息异常: {cookie_id_for_log} -> {to_user_id_for_log}, 错误: {str(e)}")
-        return SendMessageResponse(
-            success=False,
-            message=f"发送消息失败: {str(e)}"
-        )
-
-
-@app.post("/xianyu/reply", response_model=ResponseModel)
-async def xianyu_reply(req: RequestModel):
-    msg_template = match_reply(req.cookie_id, req.send_message)
-    is_default_reply = False
-
-    if not msg_template:
-        # 从数据库获取默认回复
-        from db_manager import db_manager
-        default_reply_settings = db_manager.get_default_reply(req.cookie_id)
-
-        if default_reply_settings and default_reply_settings.get('enabled', False):
-            # 检查是否开启了"只回复一次"功能
-            if default_reply_settings.get('reply_once', False):
-                # 检查是否已经回复过这个chat_id
-                if db_manager.has_default_reply_record(req.cookie_id, req.chat_id):
-                    raise HTTPException(status_code=404, detail="该对话已使用默认回复，不再重复回复")
-
-            msg_template = default_reply_settings.get('reply_content', '')
-            is_default_reply = True
-
-        # 如果数据库中没有设置或为空，返回错误
-        if not msg_template:
-            raise HTTPException(status_code=404, detail="未找到匹配的回复规则且未设置默认回复")
-
-    # 按占位符格式化
-    try:
-        send_msg = msg_template.format(
-            send_user_id=req.send_user_id,
-            send_user_name=req.send_user_name,
-            send_message=req.send_message,
-        )
-    except Exception:
-        # 如果格式化失败，返回原始内容
-        send_msg = msg_template
-
-    # 如果是默认回复且开启了"只回复一次"，记录回复记录
-    if is_default_reply:
-        from db_manager import db_manager
-        default_reply_settings = db_manager.get_default_reply(req.cookie_id)
-        if default_reply_settings and default_reply_settings.get('reply_once', False):
-            db_manager.add_default_reply_record(req.cookie_id, req.chat_id)
-
-    return {"code": 200, "data": {"send_msg": send_msg}}
-
-# ------------------------- 账号 / 关键字管理接口 -------------------------
-
-
-class CookieIn(BaseModel):
-    id: str
-    value: str
-
-
-class CookieStatusIn(BaseModel):
-    enabled: bool
-
-
-class DefaultReplyIn(BaseModel):
-    enabled: bool
-    reply_content: Optional[str] = None
-    reply_once: bool = False
+from app.repositories.db_manager import db_manager
+from app.services import cookie_manager
+from app.services.ai_reply import ai_reply_engine
+from app.services.file_log_collector import get_file_log_collector
+from app.utils.image_utils import image_manager
+
+router = APIRouter()
+
+# ------------------------- 通用数据模型 -------------------------
 
 
 class NotificationChannelIn(BaseModel):
@@ -1070,714 +55,17 @@ class MessageNotificationIn(BaseModel):
 
 class SystemSettingIn(BaseModel):
     value: str
-    description: Optional[str] = None
-
-
-class SystemSettingCreateIn(BaseModel):
-    key: str
-    value: str
-    description: Optional[str] = None
-
-
-
-
-
-@app.get("/cookies")
-def list_cookies(current_user: Dict[str, Any] = Depends(get_current_user)):
-    if cookie_manager.manager is None:
-        return []
-
-    # 获取当前用户的cookies
-    user_id = current_user['user_id']
-    from db_manager import db_manager
-    user_cookies = db_manager.get_all_cookies(user_id)
-    return list(user_cookies.keys())
-
-
-@app.get("/cookies/details")
-def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取所有Cookie的详细信息（包括值和状态）"""
-    if cookie_manager.manager is None:
-        return []
-
-    # 获取当前用户的cookies
-    user_id = current_user['user_id']
-    from db_manager import db_manager
-    user_cookies = db_manager.get_all_cookies(user_id)
-
-    result = []
-    for cookie_id, cookie_value in user_cookies.items():
-        cookie_enabled = cookie_manager.manager.get_cookie_status(cookie_id)
-        auto_confirm = db_manager.get_auto_confirm(cookie_id)
-        # 获取备注信息
-        cookie_details = db_manager.get_cookie_details(cookie_id)
-        remark = cookie_details.get('remark', '') if cookie_details else ''
-
-        result.append({
-            'id': cookie_id,
-            'value': cookie_value,
-            'enabled': cookie_enabled,
-            'auto_confirm': auto_confirm,
-            'remark': remark,
-            'pause_duration': cookie_details.get('pause_duration', 10) if cookie_details else 10
-        })
-    return result
-
-
-@app.post("/cookies")
-def add_cookie(item: CookieIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail="CookieManager 未就绪")
-    try:
-        # 添加cookie时绑定到当前用户
-        user_id = current_user['user_id']
-        from db_manager import db_manager
-
-        log_with_user('info', f"尝试添加Cookie: {item.id}, 当前用户ID: {user_id}, 用户名: {current_user.get('username', 'unknown')}", current_user)
-
-        # 检查cookie是否已存在且属于其他用户
-        existing_cookies = db_manager.get_all_cookies()
-        if item.id in existing_cookies:
-            # 检查是否属于当前用户
-            user_cookies = db_manager.get_all_cookies(user_id)
-            if item.id not in user_cookies:
-                log_with_user('warning', f"Cookie ID冲突: {item.id} 已被其他用户使用", current_user)
-                raise HTTPException(status_code=400, detail="该Cookie ID已被其他用户使用")
-
-        # 保存到数据库时指定用户ID
-        db_manager.save_cookie(item.id, item.value, user_id)
-
-        # 添加到CookieManager，同时指定用户ID
-        cookie_manager.manager.add_cookie(item.id, item.value, user_id=user_id)
-        log_with_user('info', f"Cookie添加成功: {item.id}", current_user)
-        return {"msg": "success"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_with_user('error', f"添加Cookie失败: {item.id} - {str(e)}", current_user)
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.put('/cookies/{cid}')
-def update_cookie(cid: str, item: CookieIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        from db_manager import db_manager
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        # 获取旧的 cookie 值，用于判断是否需要重启任务
-        old_cookie_details = db_manager.get_cookie_details(cid)
-        old_cookie_value = old_cookie_details.get('value') if old_cookie_details else None
-
-        # 使用 update_cookie_account_info 更新（只更新cookie值，不覆盖其他字段）
-        success = db_manager.update_cookie_account_info(cid, cookie_value=item.value)
-        
-        if not success:
-            raise HTTPException(status_code=400, detail="更新Cookie失败")
-        
-        # 只有当 cookie 值真的发生变化时才重启任务
-        if item.value != old_cookie_value:
-            logger.info(f"Cookie值已变化，重启任务: {cid}")
-            cookie_manager.manager.update_cookie(cid, item.value, save_to_db=False)
-        else:
-            logger.info(f"Cookie值未变化，无需重启任务: {cid}")
-        
-        return {'msg': 'updated'}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-class CookieAccountInfo(BaseModel):
-    """账号信息更新模型"""
-    value: Optional[str] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
-    show_browser: Optional[bool] = None
-
-
-@app.post("/cookie/{cid}/account-info")
-def update_cookie_account_info(cid: str, info: CookieAccountInfo, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """更新账号信息（Cookie、用户名、密码、显示浏览器设置）"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        from db_manager import db_manager
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        # 获取旧的 cookie 值，用于判断是否需要重启任务
-        old_cookie_details = db_manager.get_cookie_details(cid)
-        old_cookie_value = old_cookie_details.get('value') if old_cookie_details else None
-        
-        # 更新数据库
-        success = db_manager.update_cookie_account_info(
-            cid, 
-            cookie_value=info.value,
-            username=info.username,
-            password=info.password,
-            show_browser=info.show_browser
-        )
-        
-        if not success:
-            raise HTTPException(status_code=400, detail="更新账号信息失败")
-        
-        # 只有当 cookie 值真的发生变化时才重启任务
-        if info.value is not None and info.value != old_cookie_value:
-            logger.info(f"Cookie值已变化，重启任务: {cid}")
-            cookie_manager.manager.update_cookie(cid, info.value, save_to_db=False)
-        else:
-            logger.info(f"Cookie值未变化，无需重启任务: {cid}")
-        
-        return {'msg': 'updated', 'success': True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新账号信息失败: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/cookie/{cid}/details")
-def get_cookie_account_details(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取账号详细信息（包括用户名、密码、显示浏览器设置）"""
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        from db_manager import db_manager
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        # 获取详细信息
-        details = db_manager.get_cookie_details(cid)
-        
-        if not details:
-            raise HTTPException(status_code=404, detail="账号不存在")
-        
-        return details
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取账号详情失败: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# ========================= 扫码登录相关接口 =========================
-
-@app.post("/qr-login/generate")
-async def generate_qr_code(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """生成扫码登录二维码"""
-    try:
-        log_with_user('info', "请求生成扫码登录二维码", current_user)
-
-        result = await qr_login_manager.generate_qr_code()
-
-        if result['success']:
-            log_with_user('info', f"扫码登录二维码生成成功: {result['session_id']}", current_user)
-        else:
-            log_with_user('warning', f"扫码登录二维码生成失败: {result.get('message', '未知错误')}", current_user)
-
-        return result
-
-    except Exception as e:
-        log_with_user('error', f"生成扫码登录二维码异常: {str(e)}", current_user)
-        return {'success': False, 'message': f'生成二维码失败: {str(e)}'}
-
-
-@app.get("/qr-login/check/{session_id}")
-async def check_qr_code_status(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """检查扫码登录状态"""
-    try:
-        # 清理过期记录
-        cleanup_qr_check_records()
-
-        # 检查是否已经处理过
-        if session_id in qr_check_processed:
-            record = qr_check_processed[session_id]
-            if record['processed']:
-                log_with_user('debug', f"扫码登录session {session_id} 已处理过，直接返回", current_user)
-                # 返回简单的成功状态，避免重复处理
-                return {'status': 'already_processed', 'message': '该会话已处理完成'}
-
-        # 获取该session的锁
-        session_lock = qr_check_locks[session_id]
-
-        # 使用非阻塞方式尝试获取锁
-        if session_lock.locked():
-            log_with_user('debug', f"扫码登录session {session_id} 正在被其他请求处理，跳过", current_user)
-            return {'status': 'processing', 'message': '正在处理中，请稍候...'}
-
-        async with session_lock:
-            # 再次检查是否已处理（双重检查）
-            if session_id in qr_check_processed and qr_check_processed[session_id]['processed']:
-                log_with_user('debug', f"扫码登录session {session_id} 在获取锁后发现已处理，直接返回", current_user)
-                return {'status': 'already_processed', 'message': '该会话已处理完成'}
-
-            # 清理过期会话
-            qr_login_manager.cleanup_expired_sessions()
-
-            # 获取会话状态
-            status_info = qr_login_manager.get_session_status(session_id)
-
-            if status_info['status'] == 'success':
-                # 登录成功，处理Cookie（现在包含获取真实cookie的逻辑）
-                cookies_info = qr_login_manager.get_session_cookies(session_id)
-                if cookies_info:
-                    account_info = await process_qr_login_cookies(
-                        cookies_info['cookies'],
-                        cookies_info['unb'],
-                        current_user
-                    )
-                    status_info['account_info'] = account_info
-
-                    log_with_user('info', f"扫码登录处理完成: {session_id}, 账号: {account_info.get('account_id', 'unknown')}", current_user)
-
-                    # 标记该session已处理
-                    qr_check_processed[session_id] = {
-                        'processed': True,
-                        'timestamp': time.time()
-                    }
-
-            return status_info
-
-    except Exception as e:
-        log_with_user('error', f"检查扫码登录状态异常: {str(e)}", current_user)
-        return {'status': 'error', 'message': str(e)}
-
-
-async def process_qr_login_cookies(cookies: str, unb: str, current_user: Dict[str, Any]) -> Dict[str, Any]:
-    """处理扫码登录获取的Cookie - 先获取真实cookie再保存到数据库"""
-    try:
-        user_id = current_user['user_id']
-
-        # 检查是否已存在相同unb的账号
-        existing_cookies = db_manager.get_all_cookies(user_id)
-        existing_account_id = None
-
-        for account_id, cookie_value in existing_cookies.items():
-            try:
-                # 解析现有Cookie中的unb
-                existing_cookie_dict = trans_cookies(cookie_value)
-                if existing_cookie_dict.get('unb') == unb:
-                    existing_account_id = account_id
-                    break
-            except:
-                continue
-
-        # 确定账号ID
-        if existing_account_id:
-            account_id = existing_account_id
-            is_new_account = False
-            log_with_user('info', f"扫码登录找到现有账号: {account_id}, UNB: {unb}", current_user)
-        else:
-            # 创建新账号，使用unb作为账号ID
-            account_id = unb
-
-            # 确保账号ID唯一
-            counter = 1
-            original_account_id = account_id
-            while account_id in existing_cookies:
-                account_id = f"{original_account_id}_{counter}"
-                counter += 1
-
-            is_new_account = True
-            log_with_user('info', f"扫码登录准备创建新账号: {account_id}, UNB: {unb}", current_user)
-
-        # 第一步：使用扫码cookie获取真实cookie
-        log_with_user('info', f"开始使用扫码cookie获取真实cookie: {account_id}", current_user)
-
-        try:
-            # 创建一个临时的XianyuLive实例来执行cookie刷新
-            from XianyuAutoAsync import XianyuLive
-
-            # 使用扫码登录的cookie创建临时实例
-            temp_instance = XianyuLive(
-                cookies_str=cookies,
-                cookie_id=account_id,
-                user_id=user_id
-            )
-
-            # 执行cookie刷新获取真实cookie
-            refresh_success = await temp_instance.refresh_cookies_from_qr_login(
-                qr_cookies_str=cookies,
-                cookie_id=account_id,
-                user_id=user_id
-            )
-
-            if refresh_success:
-                log_with_user('info', f"扫码登录真实cookie获取成功: {account_id}", current_user)
-
-                # 从数据库获取刚刚保存的真实cookie
-                updated_cookie_info = db_manager.get_cookie_by_id(account_id)
-                if updated_cookie_info:
-                    real_cookies = updated_cookie_info['cookies_str']
-                    log_with_user('info', f"已获取真实cookie，长度: {len(real_cookies)}", current_user)
-
-                    # 第二步：将真实cookie添加到cookie_manager（如果是新账号）或更新现有账号
-                    if cookie_manager.manager:
-                        if is_new_account:
-                            cookie_manager.manager.add_cookie(account_id, real_cookies)
-                            log_with_user('info', f"已将真实cookie添加到cookie_manager: {account_id}", current_user)
-                        else:
-                            # refresh_cookies_from_qr_login 已经保存到数据库了，这里不需要再保存
-                            cookie_manager.manager.update_cookie(account_id, real_cookies, save_to_db=False)
-                            log_with_user('info', f"已更新cookie_manager中的真实cookie: {account_id}", current_user)
-
-                    return {
-                        'account_id': account_id,
-                        'is_new_account': is_new_account,
-                        'real_cookie_refreshed': True,
-                        'cookie_length': len(real_cookies)
-                    }
-                else:
-                    log_with_user('error', f"无法从数据库获取真实cookie: {account_id}", current_user)
-                    # 降级处理：使用原始扫码cookie
-                    return await _fallback_save_qr_cookie(account_id, cookies, user_id, is_new_account, current_user, "无法从数据库获取真实cookie")
-            else:
-                log_with_user('warning', f"扫码登录真实cookie获取失败: {account_id}", current_user)
-                # 降级处理：使用原始扫码cookie
-                return await _fallback_save_qr_cookie(account_id, cookies, user_id, is_new_account, current_user, "真实cookie获取失败")
-
-        except Exception as refresh_e:
-            log_with_user('error', f"扫码登录真实cookie获取异常: {str(refresh_e)}", current_user)
-            # 降级处理：使用原始扫码cookie
-            return await _fallback_save_qr_cookie(account_id, cookies, user_id, is_new_account, current_user, f"获取真实cookie异常: {str(refresh_e)}")
-
-    except Exception as e:
-        log_with_user('error', f"处理扫码登录Cookie失败: {str(e)}", current_user)
-        raise e
-
-
-async def _fallback_save_qr_cookie(account_id: str, cookies: str, user_id: int, is_new_account: bool, current_user: Dict[str, Any], error_reason: str) -> Dict[str, Any]:
-    """降级处理：当无法获取真实cookie时，保存原始扫码cookie"""
-    try:
-        log_with_user('warning', f"降级处理 - 保存原始扫码cookie: {account_id}, 原因: {error_reason}", current_user)
-
-        # 保存原始扫码cookie到数据库
-        if is_new_account:
-            db_manager.save_cookie(account_id, cookies, user_id)
-            log_with_user('info', f"降级处理 - 新账号原始cookie已保存: {account_id}", current_user)
-        else:
-            # 现有账号使用 update_cookie_account_info 避免覆盖其他字段
-            db_manager.update_cookie_account_info(account_id, cookie_value=cookies)
-            log_with_user('info', f"降级处理 - 现有账号原始cookie已更新: {account_id}", current_user)
-
-        # 添加到或更新cookie_manager
-        if cookie_manager.manager:
-            if is_new_account:
-                cookie_manager.manager.add_cookie(account_id, cookies)
-                log_with_user('info', f"降级处理 - 已将原始cookie添加到cookie_manager: {account_id}", current_user)
-            else:
-                # update_cookie_account_info 已经保存到数据库了，这里不需要再保存
-                cookie_manager.manager.update_cookie(account_id, cookies, save_to_db=False)
-                log_with_user('info', f"降级处理 - 已更新cookie_manager中的原始cookie: {account_id}", current_user)
-
-        return {
-            'account_id': account_id,
-            'is_new_account': is_new_account,
-            'real_cookie_refreshed': False,
-            'fallback_reason': error_reason,
-            'cookie_length': len(cookies)
-        }
-
-    except Exception as fallback_e:
-        log_with_user('error', f"降级处理失败: {str(fallback_e)}", current_user)
-        raise fallback_e
-
-
-@app.post("/qr-login/refresh-cookies")
-async def refresh_cookies_from_qr_login(
-    request: Dict[str, Any],
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """使用扫码登录获取的cookie访问指定界面获取真实cookie并存入数据库"""
-    try:
-        qr_cookies = request.get('qr_cookies')
-        cookie_id = request.get('cookie_id')
-
-        if not qr_cookies:
-            return {'success': False, 'message': '缺少扫码登录cookie'}
-
-        if not cookie_id:
-            return {'success': False, 'message': '缺少cookie_id'}
-
-        log_with_user('info', f"开始使用扫码cookie刷新真实cookie: {cookie_id}", current_user)
-
-        # 创建一个临时的XianyuLive实例来执行cookie刷新
-        from XianyuAutoAsync import XianyuLive
-
-        # 使用扫码登录的cookie创建临时实例
-        temp_instance = XianyuLive(
-            cookies_str=qr_cookies,
-            cookie_id=cookie_id,
-            user_id=current_user['user_id']
-        )
-
-        # 执行cookie刷新
-        success = await temp_instance.refresh_cookies_from_qr_login(
-            qr_cookies_str=qr_cookies,
-            cookie_id=cookie_id,
-            user_id=current_user['user_id']
-        )
-
-        if success:
-            log_with_user('info', f"扫码cookie刷新成功: {cookie_id}", current_user)
-
-            # 如果cookie_manager存在，更新其中的cookie
-            if cookie_manager.manager:
-                # 从数据库获取更新后的cookie
-                updated_cookie_info = db_manager.get_cookie_by_id(cookie_id)
-                if updated_cookie_info:
-                    # refresh_cookies_from_qr_login 已经保存到数据库了，这里不需要再保存
-                    cookie_manager.manager.update_cookie(cookie_id, updated_cookie_info['cookies_str'], save_to_db=False)
-                    log_with_user('info', f"已更新cookie_manager中的cookie: {cookie_id}", current_user)
-
-            return {
-                'success': True,
-                'message': '真实cookie获取并保存成功',
-                'cookie_id': cookie_id
-            }
-        else:
-            log_with_user('error', f"扫码cookie刷新失败: {cookie_id}", current_user)
-            return {'success': False, 'message': '获取真实cookie失败'}
-
-    except Exception as e:
-        log_with_user('error', f"扫码cookie刷新异常: {str(e)}", current_user)
-        return {'success': False, 'message': f'刷新cookie失败: {str(e)}'}
-
-
-@app.post("/qr-login/reset-cooldown/{cookie_id}")
-async def reset_qr_cookie_refresh_cooldown(
-    cookie_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """重置指定账号的扫码登录Cookie刷新冷却时间"""
-    try:
-        log_with_user('info', f"重置扫码登录Cookie刷新冷却时间: {cookie_id}", current_user)
-
-        # 检查cookie是否存在
-        cookie_info = db_manager.get_cookie_by_id(cookie_id)
-        if not cookie_info:
-            return {'success': False, 'message': '账号不存在'}
-
-        # 如果cookie_manager中有对应的实例，直接重置
-        if cookie_manager.manager and cookie_id in cookie_manager.manager.instances:
-            instance = cookie_manager.manager.instances[cookie_id]
-            remaining_time_before = instance.get_qr_cookie_refresh_remaining_time()
-            instance.reset_qr_cookie_refresh_flag()
-
-            log_with_user('info', f"已重置账号 {cookie_id} 的扫码登录冷却时间，原剩余时间: {remaining_time_before}秒", current_user)
-
-            return {
-                'success': True,
-                'message': '扫码登录Cookie刷新冷却时间已重置',
-                'cookie_id': cookie_id,
-                'previous_remaining_time': remaining_time_before
-            }
-        else:
-            # 如果没有活跃实例，返回成功（因为没有冷却时间需要重置）
-            log_with_user('info', f"账号 {cookie_id} 没有活跃实例，无需重置冷却时间", current_user)
-            return {
-                'success': True,
-                'message': '账号没有活跃实例，无需重置冷却时间',
-                'cookie_id': cookie_id
-            }
-
-    except Exception as e:
-        log_with_user('error', f"重置扫码登录冷却时间异常: {str(e)}", current_user)
-        return {'success': False, 'message': f'重置冷却时间失败: {str(e)}'}
-
-
-@app.get("/qr-login/cooldown-status/{cookie_id}")
-async def get_qr_cookie_refresh_cooldown_status(
-    cookie_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """获取指定账号的扫码登录Cookie刷新冷却状态"""
-    try:
-        # 检查cookie是否存在
-        cookie_info = db_manager.get_cookie_by_id(cookie_id)
-        if not cookie_info:
-            return {'success': False, 'message': '账号不存在'}
-
-        # 如果cookie_manager中有对应的实例，获取冷却状态
-        if cookie_manager.manager and cookie_id in cookie_manager.manager.instances:
-            instance = cookie_manager.manager.instances[cookie_id]
-            remaining_time = instance.get_qr_cookie_refresh_remaining_time()
-            cooldown_duration = instance.qr_cookie_refresh_cooldown
-            last_refresh_time = instance.last_qr_cookie_refresh_time
-
-            return {
-                'success': True,
-                'cookie_id': cookie_id,
-                'remaining_time': remaining_time,
-                'cooldown_duration': cooldown_duration,
-                'last_refresh_time': last_refresh_time,
-                'is_in_cooldown': remaining_time > 0,
-                'remaining_minutes': remaining_time // 60,
-                'remaining_seconds': remaining_time % 60
-            }
-        else:
-            return {
-                'success': True,
-                'cookie_id': cookie_id,
-                'remaining_time': 0,
-                'cooldown_duration': 600,  # 默认10分钟
-                'last_refresh_time': 0,
-                'is_in_cooldown': False,
-                'message': '账号没有活跃实例'
-            }
-
-    except Exception as e:
-        log_with_user('error', f"获取扫码登录冷却状态异常: {str(e)}", current_user)
-        return {'success': False, 'message': f'获取冷却状态失败: {str(e)}'}
-
-
-@app.put('/cookies/{cid}/status')
-def update_cookie_status(cid: str, status_data: CookieStatusIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """更新账号的启用/禁用状态"""
-    if cookie_manager.manager is None:
-        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        from db_manager import db_manager
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        cookie_manager.manager.update_cookie_status(cid, status_data.enabled)
-        return {'msg': 'status updated', 'enabled': status_data.enabled}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# ------------------------- 默认回复管理接口 -------------------------
-
-@app.get('/default-replies/{cid}')
-def get_default_reply(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取指定账号的默认回复设置"""
-    from db_manager import db_manager
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限访问该Cookie")
-
-        result = db_manager.get_default_reply(cid)
-        if result is None:
-            # 如果没有设置，返回默认值
-            return {'enabled': False, 'reply_content': '', 'reply_once': False}
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put('/default-replies/{cid}')
-def update_default_reply(cid: str, reply_data: DefaultReplyIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """更新指定账号的默认回复设置"""
-    from db_manager import db_manager
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        db_manager.save_default_reply(cid, reply_data.enabled, reply_data.reply_content, reply_data.reply_once)
-        return {'msg': 'default reply updated', 'enabled': reply_data.enabled, 'reply_once': reply_data.reply_once}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get('/default-replies')
-def get_all_default_replies(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取当前用户所有账号的默认回复设置"""
-    from db_manager import db_manager
-    try:
-        # 只返回当前用户的默认回复设置
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        all_replies = db_manager.get_all_default_replies()
-        # 过滤只属于当前用户的回复设置
-        user_replies = {cid: reply for cid, reply in all_replies.items() if cid in user_cookies}
-        return user_replies
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete('/default-replies/{cid}')
-def delete_default_reply(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """删除指定账号的默认回复设置"""
-    from db_manager import db_manager
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        success = db_manager.delete_default_reply(cid)
-        if success:
-            return {'msg': 'default reply deleted'}
-        else:
-            raise HTTPException(status_code=400, detail='删除失败')
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/default-replies/{cid}/clear-records')
-def clear_default_reply_records(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """清空指定账号的默认回复记录"""
-    from db_manager import db_manager
-    try:
-        # 检查cookie是否属于当前用户
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-
-        db_manager.clear_default_reply_records(cid)
-        return {'msg': 'default reply records cleared'}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    description: Optional[str] = ""
 
 
 # ------------------------- 通知渠道管理接口 -------------------------
 
-@app.get('/notification-channels')
+# ------------------------- 通知渠道管理接口 -------------------------
+
+@router.get('/notification-channels')
 def get_notification_channels(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取所有通知渠道"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         user_id = current_user['user_id']
         return db_manager.get_notification_channels(user_id)
@@ -1785,10 +73,10 @@ def get_notification_channels(current_user: Dict[str, Any] = Depends(get_current
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post('/notification-channels')
+@router.post('/notification-channels')
 def create_notification_channel(channel_data: NotificationChannelIn, current_user: Dict[str, Any] = Depends(get_current_user)):
     """创建通知渠道"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         user_id = current_user['user_id']
         channel_id = db_manager.create_notification_channel(
@@ -1802,10 +90,10 @@ def create_notification_channel(channel_data: NotificationChannelIn, current_use
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get('/notification-channels/{channel_id}')
+@router.get('/notification-channels/{channel_id}')
 def get_notification_channel(channel_id: int, _: None = Depends(require_auth)):
     """获取指定通知渠道"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         channel = db_manager.get_notification_channel(channel_id)
         if not channel:
@@ -1817,10 +105,10 @@ def get_notification_channel(channel_id: int, _: None = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put('/notification-channels/{channel_id}')
+@router.put('/notification-channels/{channel_id}')
 def update_notification_channel(channel_id: int, channel_data: NotificationChannelUpdate, _: None = Depends(require_auth)):
     """更新通知渠道"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         success = db_manager.update_notification_channel(
             channel_id,
@@ -1838,10 +126,10 @@ def update_notification_channel(channel_id: int, channel_data: NotificationChann
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete('/notification-channels/{channel_id}')
+@router.delete('/notification-channels/{channel_id}')
 def delete_notification_channel(channel_id: int, _: None = Depends(require_auth)):
     """删除通知渠道"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         success = db_manager.delete_notification_channel(channel_id)
         if success:
@@ -1856,10 +144,10 @@ def delete_notification_channel(channel_id: int, _: None = Depends(require_auth)
 
 # ------------------------- 消息通知配置接口 -------------------------
 
-@app.get('/message-notifications')
+@router.get('/message-notifications')
 def get_all_message_notifications(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户所有账号的消息通知配置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         # 只返回当前用户的消息通知配置
         user_id = current_user['user_id']
@@ -1873,10 +161,10 @@ def get_all_message_notifications(current_user: Dict[str, Any] = Depends(get_cur
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get('/message-notifications/{cid}')
+@router.get('/message-notifications/{cid}')
 def get_account_notifications(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定账号的消息通知配置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
@@ -1892,10 +180,10 @@ def get_account_notifications(cid: str, current_user: Dict[str, Any] = Depends(g
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post('/message-notifications/{cid}')
+@router.post('/message-notifications/{cid}')
 def set_message_notification(cid: str, notification_data: MessageNotificationIn, current_user: Dict[str, Any] = Depends(get_current_user)):
     """设置账号的消息通知"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
@@ -1920,10 +208,10 @@ def set_message_notification(cid: str, notification_data: MessageNotificationIn,
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete('/message-notifications/account/{cid}')
+@router.delete('/message-notifications/account/{cid}')
 def delete_account_notifications(cid: str, _: None = Depends(require_auth)):
     """删除账号的所有消息通知配置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         success = db_manager.delete_account_notifications(cid)
         if success:
@@ -1936,10 +224,10 @@ def delete_account_notifications(cid: str, _: None = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete('/message-notifications/{notification_id}')
+@router.delete('/message-notifications/{notification_id}')
 def delete_message_notification(notification_id: int, _: None = Depends(require_auth)):
     """删除消息通知配置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         success = db_manager.delete_message_notification(notification_id)
         if success:
@@ -1954,10 +242,10 @@ def delete_message_notification(notification_id: int, _: None = Depends(require_
 
 # ------------------------- 系统设置接口 -------------------------
 
-@app.get('/system-settings')
+@router.get('/system-settings')
 def get_system_settings(_: None = Depends(require_auth)):
     """获取系统设置（排除敏感信息）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         settings = db_manager.get_all_system_settings()
         # 移除敏感信息
@@ -1971,10 +259,10 @@ def get_system_settings(_: None = Depends(require_auth)):
 
 
 
-@app.put('/system-settings/{key}')
+@router.put('/system-settings/{key}')
 def update_system_setting(key: str, setting_data: SystemSettingIn, _: None = Depends(require_auth)):
     """更新系统设置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         # 禁止直接修改密码哈希
         if key == 'admin_password_hash':
@@ -1993,10 +281,10 @@ def update_system_setting(key: str, setting_data: SystemSettingIn, _: None = Dep
 
 # ------------------------- 注册设置接口 -------------------------
 
-@app.get('/registration-status')
+@router.get('/registration-status')
 def get_registration_status():
     """获取注册开关状态（公开接口，无需认证）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         enabled_str = db_manager.get_system_setting('registration_enabled')
         logger.info(f"从数据库获取的注册设置值: '{enabled_str}'")  # 调试信息
@@ -2020,10 +308,10 @@ def get_registration_status():
         return {'enabled': True, 'message': '注册功能已开启'}  # 出错时默认开启
 
 
-@app.get('/login-info-status')
+@router.get('/login-info-status')
 def get_login_info_status():
     """获取默认登录信息显示状态（公开接口，无需认证）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         enabled_str = db_manager.get_system_setting('show_default_login_info')
         logger.debug(f"从数据库获取的登录信息显示设置值: '{enabled_str}'")
@@ -2049,10 +337,10 @@ class LoginInfoSettingUpdate(BaseModel):
     enabled: bool
 
 
-@app.put('/registration-settings')
+@router.put('/registration-settings')
 def update_registration_settings(setting_data: RegistrationSettingUpdate, admin_user: Dict[str, Any] = Depends(require_admin)):
     """更新注册开关设置（仅管理员）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         enabled = setting_data.enabled
         success = db_manager.set_system_setting(
@@ -2075,10 +363,10 @@ def update_registration_settings(setting_data: RegistrationSettingUpdate, admin_
         logger.error(f"更新注册设置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put('/login-info-settings')
+@router.put('/login-info-settings')
 def update_login_info_settings(setting_data: LoginInfoSettingUpdate, admin_user: Dict[str, Any] = Depends(require_admin)):
     """更新默认登录信息显示设置（仅管理员）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         enabled = setting_data.enabled
         success = db_manager.set_system_setting(
@@ -2104,14 +392,14 @@ def update_login_info_settings(setting_data: LoginInfoSettingUpdate, admin_user:
 
 
 
-@app.delete("/cookies/{cid}")
+@router.delete("/cookies/{cid}")
 def remove_cookie(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     if cookie_manager.manager is None:
         raise HTTPException(status_code=500, detail="CookieManager 未就绪")
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2137,7 +425,7 @@ class PauseDurationUpdate(BaseModel):
     pause_duration: int
 
 
-@app.put("/cookies/{cid}/auto-confirm")
+@router.put("/cookies/{cid}/auto-confirm")
 def update_auto_confirm(cid: str, update_data: AutoConfirmUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新账号的自动确认发货设置"""
     if cookie_manager.manager is None:
@@ -2145,7 +433,7 @@ def update_auto_confirm(cid: str, update_data: AutoConfirmUpdate, current_user: 
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2171,7 +459,7 @@ def update_auto_confirm(cid: str, update_data: AutoConfirmUpdate, current_user: 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/cookies/{cid}/auto-confirm")
+@router.get("/cookies/{cid}/auto-confirm")
 def get_auto_confirm(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取账号的自动确认发货设置"""
     if cookie_manager.manager is None:
@@ -2179,7 +467,7 @@ def get_auto_confirm(cid: str, current_user: Dict[str, Any] = Depends(get_curren
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2197,7 +485,7 @@ def get_auto_confirm(cid: str, current_user: Dict[str, Any] = Depends(get_curren
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/cookies/{cid}/remark")
+@router.put("/cookies/{cid}/remark")
 def update_cookie_remark(cid: str, update_data: RemarkUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新账号备注"""
     if cookie_manager.manager is None:
@@ -2205,7 +493,7 @@ def update_cookie_remark(cid: str, update_data: RemarkUpdate, current_user: Dict
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2227,7 +515,7 @@ def update_cookie_remark(cid: str, update_data: RemarkUpdate, current_user: Dict
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/cookies/{cid}/remark")
+@router.get("/cookies/{cid}/remark")
 def get_cookie_remark(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取账号备注"""
     if cookie_manager.manager is None:
@@ -2235,7 +523,7 @@ def get_cookie_remark(cid: str, current_user: Dict[str, Any] = Depends(get_curre
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2256,7 +544,7 @@ def get_cookie_remark(cid: str, current_user: Dict[str, Any] = Depends(get_curre
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/cookies/{cid}/pause-duration")
+@router.put("/cookies/{cid}/pause-duration")
 def update_cookie_pause_duration(cid: str, update_data: PauseDurationUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新账号自动回复暂停时间"""
     if cookie_manager.manager is None:
@@ -2264,7 +552,7 @@ def update_cookie_pause_duration(cid: str, update_data: PauseDurationUpdate, cur
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2290,7 +578,7 @@ def update_cookie_pause_duration(cid: str, update_data: PauseDurationUpdate, cur
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/cookies/{cid}/pause-duration")
+@router.get("/cookies/{cid}/pause-duration")
 def get_cookie_pause_duration(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取账号自动回复暂停时间"""
     if cookie_manager.manager is None:
@@ -2298,7 +586,7 @@ def get_cookie_pause_duration(cid: str, current_user: Dict[str, Any] = Depends(g
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cid not in user_cookies:
@@ -2325,14 +613,14 @@ class KeywordWithItemIdIn(BaseModel):
     keywords: List[Dict[str, Any]]  # [{"keyword": str, "reply": str, "item_id": str}]
 
 
-@app.get("/keywords/{cid}")
+@router.get("/keywords/{cid}")
 def get_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     if cookie_manager.manager is None:
         raise HTTPException(status_code=500, detail="CookieManager 未就绪")
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2354,7 +642,7 @@ def get_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current_us
     return all_keywords
 
 
-@app.get("/keywords-with-item-id/{cid}")
+@router.get("/keywords-with-item-id/{cid}")
 def get_keywords_with_item_id(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取包含商品ID的关键词列表"""
     if cookie_manager.manager is None:
@@ -2362,7 +650,7 @@ def get_keywords_with_item_id(cid: str, current_user: Dict[str, Any] = Depends(g
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2385,14 +673,14 @@ def get_keywords_with_item_id(cid: str, current_user: Dict[str, Any] = Depends(g
     return result
 
 
-@app.post("/keywords/{cid}")
+@router.post("/keywords/{cid}")
 def update_keywords(cid: str, body: KeywordIn, current_user: Dict[str, Any] = Depends(get_current_user)):
     if cookie_manager.manager is None:
         raise HTTPException(status_code=500, detail="CookieManager 未就绪")
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2407,7 +695,7 @@ def update_keywords(cid: str, body: KeywordIn, current_user: Dict[str, Any] = De
     return {"msg": "updated", "count": len(kw_list)}
 
 
-@app.post("/keywords-with-item-id/{cid}")
+@router.post("/keywords-with-item-id/{cid}")
 def update_keywords_with_item_id(cid: str, body: KeywordWithItemIdIn, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新包含商品ID的关键词列表"""
     if cookie_manager.manager is None:
@@ -2415,7 +703,7 @@ def update_keywords_with_item_id(cid: str, body: KeywordWithItemIdIn, current_us
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2492,7 +780,7 @@ def update_keywords_with_item_id(cid: str, body: KeywordWithItemIdIn, current_us
     return {"msg": "updated", "count": len(keywords_to_save)}
 
 
-@app.get("/items/{cid}")
+@router.get("/items/{cid}")
 def get_items_list(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定账号的商品列表"""
     if cookie_manager.manager is None:
@@ -2500,7 +788,7 @@ def get_items_list(cid: str, current_user: Dict[str, Any] = Depends(get_current_
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2533,7 +821,7 @@ def get_items_list(cid: str, current_user: Dict[str, Any] = Depends(get_current_
         raise HTTPException(status_code=500, detail="获取商品列表失败")
 
 
-@app.get("/keywords-export/{cid}")
+@router.get("/keywords-export/{cid}")
 def export_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """导出指定账号的关键词为Excel文件"""
     if cookie_manager.manager is None:
@@ -2541,7 +829,7 @@ def export_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2620,7 +908,7 @@ def export_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current
         raise HTTPException(status_code=500, detail=f"导出关键词失败: {str(e)}")
 
 
-@app.post("/keywords-import/{cid}")
+@router.post("/keywords-import/{cid}")
 async def import_keywords(cid: str, file: UploadFile = File(...), current_user: Dict[str, Any] = Depends(get_current_user)):
     """导入Excel文件中的关键词到指定账号"""
     if cookie_manager.manager is None:
@@ -2628,7 +916,7 @@ async def import_keywords(cid: str, file: UploadFile = File(...), current_user: 
 
     # 检查cookie是否属于当前用户
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     user_cookies = db_manager.get_all_cookies(user_id)
 
     if cid not in user_cookies:
@@ -2711,7 +999,7 @@ async def import_keywords(cid: str, file: UploadFile = File(...), current_user: 
         raise HTTPException(status_code=500, detail=f"导入关键词失败: {str(e)}")
 
 
-@app.post("/keywords/{cid}/image")
+@router.post("/keywords/{cid}/image")
 async def add_image_keyword(
     cid: str,
     keyword: str = Form(...),
@@ -2791,7 +1079,7 @@ async def add_image_keyword(
         raise HTTPException(status_code=500, detail=f"添加图片关键词失败: {str(e)}")
 
 
-@app.post("/upload-image")
+@router.post("/upload-image")
 async def upload_image(
     image: UploadFile = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user)
@@ -2829,7 +1117,7 @@ async def upload_image(
         raise HTTPException(status_code=500, detail=f"图片上传失败: {str(e)}")
 
 
-@app.get("/keywords-with-type/{cid}")
+@router.get("/keywords-with-type/{cid}")
 def get_keywords_with_type(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取包含类型信息的关键词列表"""
     if cookie_manager.manager is None:
@@ -2848,7 +1136,7 @@ def get_keywords_with_type(cid: str, current_user: Dict[str, Any] = Depends(get_
         raise HTTPException(status_code=500, detail=f"获取关键词列表失败: {str(e)}")
 
 
-@app.delete("/keywords/{cid}/{index}")
+@router.delete("/keywords/{cid}/{index}")
 def delete_keyword_by_index(cid: str, index: int, current_user: Dict[str, Any] = Depends(get_current_user)):
     """根据索引删除关键词"""
     if cookie_manager.manager is None:
@@ -2887,11 +1175,10 @@ def delete_keyword_by_index(cid: str, index: int, current_user: Dict[str, Any] =
         raise HTTPException(status_code=500, detail=f"删除关键词失败: {str(e)}")
 
 
-@app.get("/debug/keywords-table-info")
+@router.get("/debug/keywords-table-info")
 def debug_keywords_table_info(current_user: Dict[str, Any] = Depends(get_current_user)):
     """调试：检查keywords表结构"""
     try:
-        import sqlite3
         conn = sqlite3.connect(db_manager.db_path)
         cursor = conn.cursor()
 
@@ -2916,11 +1203,11 @@ def debug_keywords_table_info(current_user: Dict[str, Any] = Depends(get_current
 
 
 # 卡券管理API
-@app.get("/cards")
+@router.get("/cards")
 def get_cards(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的卡券列表"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         cards = db_manager.get_all_cards(user_id)
         return cards
@@ -2928,11 +1215,11 @@ def get_cards(current_user: Dict[str, Any] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/cards")
+@router.post("/cards")
 def create_card(card_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
     """创建新卡券"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         card_name = card_data.get('name', '未命名卡券')
 
@@ -2967,11 +1254,11 @@ def create_card(card_data: dict, current_user: Dict[str, Any] = Depends(get_curr
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/cards/{card_id}")
+@router.get("/cards/{card_id}")
 def get_card(card_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取单个卡券详情"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         card = db_manager.get_card_by_id(card_id, user_id)
         if card:
@@ -2982,11 +1269,11 @@ def get_card(card_id: int, current_user: Dict[str, Any] = Depends(get_current_us
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/cards/{card_id}")
+@router.put("/cards/{card_id}")
 def update_card(card_id: int, card_data: dict, _: None = Depends(require_auth)):
     """更新卡券"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         # 验证多规格字段
         is_multi_spec = card_data.get('is_multi_spec')
         if is_multi_spec:
@@ -3016,7 +1303,7 @@ def update_card(card_id: int, card_data: dict, _: None = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/cards/{card_id}/image")
+@router.put("/cards/{card_id}/image")
 async def update_card_with_image(
     card_id: int,
     image: UploadFile = File(...),
@@ -3057,7 +1344,7 @@ async def update_card_with_image(
         logger.info(f"图片保存成功: {image_url}")
 
         # 更新卡券
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         success = db_manager.update_card(
             card_id=card_id,
             name=name,
@@ -3087,11 +1374,11 @@ async def update_card_with_image(
 
 
 # 自动发货规则API
-@app.get("/delivery-rules")
+@router.get("/delivery-rules")
 def get_delivery_rules(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取发货规则列表"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         rules = db_manager.get_all_delivery_rules(user_id)
         return rules
@@ -3099,11 +1386,11 @@ def get_delivery_rules(current_user: Dict[str, Any] = Depends(get_current_user))
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/delivery-rules")
+@router.post("/delivery-rules")
 def create_delivery_rule(rule_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
     """创建新发货规则"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         rule_id = db_manager.create_delivery_rule(
             keyword=rule_data.get('keyword'),
@@ -3118,11 +1405,11 @@ def create_delivery_rule(rule_data: dict, current_user: Dict[str, Any] = Depends
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/delivery-rules/{rule_id}")
+@router.get("/delivery-rules/{rule_id}")
 def get_delivery_rule(rule_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取单个发货规则详情"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         rule = db_manager.get_delivery_rule_by_id(rule_id, user_id)
         if rule:
@@ -3133,11 +1420,11 @@ def get_delivery_rule(rule_id: int, current_user: Dict[str, Any] = Depends(get_c
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/delivery-rules/{rule_id}")
+@router.put("/delivery-rules/{rule_id}")
 def update_delivery_rule(rule_id: int, rule_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新发货规则"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         success = db_manager.update_delivery_rule(
             rule_id=rule_id,
@@ -3156,11 +1443,11 @@ def update_delivery_rule(rule_id: int, rule_data: dict, current_user: Dict[str, 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/cards/{card_id}")
+@router.delete("/cards/{card_id}")
 def delete_card(card_id: int, _: None = Depends(require_auth)):
     """删除卡券"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         success = db_manager.delete_card(card_id)
         if success:
             return {"message": "卡券删除成功"}
@@ -3170,11 +1457,11 @@ def delete_card(card_id: int, _: None = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/delivery-rules/{rule_id}")
+@router.delete("/delivery-rules/{rule_id}")
 def delete_delivery_rule(rule_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
     """删除发货规则"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         success = db_manager.delete_delivery_rule(rule_id, user_id)
         if success:
@@ -3187,11 +1474,11 @@ def delete_delivery_rule(rule_id: int, current_user: Dict[str, Any] = Depends(ge
 
 # ==================== 备份和恢复 API ====================
 
-@app.get("/backup/export")
+@router.get("/backup/export")
 def export_backup(current_user: Dict[str, Any] = Depends(get_current_user)):
     """导出用户备份"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         username = current_user['username']
 
@@ -3213,7 +1500,7 @@ def export_backup(current_user: Dict[str, Any] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"导出备份失败: {str(e)}")
 
 
-@app.post("/backup/import")
+@router.post("/backup/import")
 def import_backup(file: UploadFile = File(...), current_user: Dict[str, Any] = Depends(get_current_user)):
     """导入用户备份"""
     try:
@@ -3226,13 +1513,13 @@ def import_backup(file: UploadFile = File(...), current_user: Dict[str, Any] = D
         backup_data = json.loads(content.decode('utf-8'))
 
         # 导入备份到当前用户
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_id = current_user['user_id']
         success = db_manager.import_backup(backup_data, user_id)
 
         if success:
             # 备份导入成功后，刷新 CookieManager 的内存缓存
-            import cookie_manager
+            from app.services import cookie_manager
             if cookie_manager.manager:
                 try:
                     cookie_manager.manager.reload_from_db()
@@ -3250,11 +1537,11 @@ def import_backup(file: UploadFile = File(...), current_user: Dict[str, Any] = D
         raise HTTPException(status_code=500, detail=f"导入备份失败: {str(e)}")
 
 
-@app.post("/system/reload-cache")
+@router.post("/system/reload-cache")
 def reload_cache(_: None = Depends(require_auth)):
     """重新加载系统缓存（用于手动刷新数据）"""
     try:
-        import cookie_manager
+        from app.services import cookie_manager
         if cookie_manager.manager:
             success = cookie_manager.manager.reload_from_db()
             if success:
@@ -3269,13 +1556,13 @@ def reload_cache(_: None = Depends(require_auth)):
 
 # ==================== 商品管理 API ====================
 
-@app.get("/items")
+@router.get("/items")
 def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的所有商品信息"""
     try:
         # 只返回当前用户的商品信息
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         all_items = []
@@ -3299,7 +1586,7 @@ class ItemSearchMultipleRequest(BaseModel):
     keyword: str
     total_pages: int = 1
 
-@app.post("/items/search")
+@router.post("/items/search")
 async def search_items(
     search_request: ItemSearchRequest,
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
@@ -3310,7 +1597,7 @@ async def search_items(
     try:
         logger.info(f"{user_info} 开始单页搜索: 关键词='{search_request.keyword}', 页码={search_request.page}, 每页={search_request.page_size}")
 
-        from utils.item_search import search_xianyu_items
+        from app.utils.item_search import search_xianyu_items
 
         # 执行搜索
         result = await search_xianyu_items(
@@ -3349,7 +1636,7 @@ async def search_items(
         raise HTTPException(status_code=500, detail=f"商品搜索失败: {error_msg}")
 
 
-@app.get("/cookies/check")
+@router.get("/cookies/check")
 async def check_valid_cookies(
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
@@ -3364,7 +1651,7 @@ async def check_valid_cookies(
                 "totalCount": 0
             }
 
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
 
         # 获取所有cookies
         all_cookies = db_manager.get_all_cookies()
@@ -3398,7 +1685,7 @@ async def check_valid_cookies(
             "error": str(e)
         }
 
-@app.post("/items/search_multiple")
+@router.post("/items/search_multiple")
 async def search_multiple_pages(
     search_request: ItemSearchMultipleRequest,
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
@@ -3409,7 +1696,7 @@ async def search_multiple_pages(
     try:
         logger.info(f"{user_info} 开始多页搜索: 关键词='{search_request.keyword}', 页数={search_request.total_pages}")
 
-        from utils.item_search import search_multiple_pages_xianyu
+        from app.utils.item_search import search_multiple_pages_xianyu
 
         # 执行多页搜索
         result = await search_multiple_pages_xianyu(
@@ -3448,13 +1735,13 @@ async def search_multiple_pages(
 
 
 
-@app.get("/items/cookie/{cookie_id}")
+@router.get("/items/cookie/{cookie_id}")
 def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定Cookie的商品信息"""
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3468,13 +1755,13 @@ def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(g
         raise HTTPException(status_code=500, detail=f"获取商品信息失败: {str(e)}")
 
 
-@app.get("/items/{cookie_id}/{item_id}")
+@router.get("/items/{cookie_id}/{item_id}")
 def get_item_detail(cookie_id: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取商品详情"""
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3494,7 +1781,7 @@ class ItemDetailUpdate(BaseModel):
     item_detail: str
 
 
-@app.put("/items/{cookie_id}/{item_id}")
+@router.put("/items/{cookie_id}/{item_id}")
 def update_item_detail(
     cookie_id: str,
     item_id: str,
@@ -3505,7 +1792,7 @@ def update_item_detail(
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3522,7 +1809,7 @@ def update_item_detail(
         raise HTTPException(status_code=500, detail=f"更新商品详情失败: {str(e)}")
 
 
-@app.delete("/items/{cookie_id}/{item_id}")
+@router.delete("/items/{cookie_id}/{item_id}")
 def delete_item_info(
     cookie_id: str,
     item_id: str,
@@ -3532,7 +1819,7 @@ def delete_item_info(
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3565,7 +1852,7 @@ class AIReplySettings(BaseModel):
     custom_prompts: str = ""
 
 
-@app.delete("/items/batch")
+@router.delete("/items/batch")
 def batch_delete_items(
     request: BatchDeleteRequest,
     _: None = Depends(require_auth)
@@ -3579,7 +1866,7 @@ def batch_delete_items(
         total_count = len(request.items)
 
         return {
-            "message": f"批量删除完成",
+            "message": "批量删除完成",
             "success_count": success_count,
             "total_count": total_count,
             "failed_count": total_count - success_count
@@ -3591,13 +1878,13 @@ def batch_delete_items(
 
 # ==================== AI回复管理API ====================
 
-@app.get("/ai-reply-settings/{cookie_id}")
+@router.get("/ai-reply-settings/{cookie_id}")
 def get_ai_reply_settings(cookie_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定账号的AI回复设置"""
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3612,13 +1899,13 @@ def get_ai_reply_settings(cookie_id: str, current_user: Dict[str, Any] = Depends
         raise HTTPException(status_code=500, detail=f"服务器错误: {str(e)}")
 
 
-@app.put("/ai-reply-settings/{cookie_id}")
+@router.put("/ai-reply-settings/{cookie_id}")
 def update_ai_reply_settings(cookie_id: str, settings: AIReplySettings, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新指定账号的AI回复设置"""
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -3652,13 +1939,13 @@ def update_ai_reply_settings(cookie_id: str, settings: AIReplySettings, current_
         raise HTTPException(status_code=500, detail=f"服务器错误: {str(e)}")
 
 
-@app.get("/ai-reply-settings")
+@router.get("/ai-reply-settings")
 def get_all_ai_reply_settings(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户所有账号的AI回复设置"""
     try:
         # 只返回当前用户的AI回复设置
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         all_settings = db_manager.get_all_ai_reply_settings()
@@ -3670,7 +1957,7 @@ def get_all_ai_reply_settings(current_user: Dict[str, Any] = Depends(get_current
         raise HTTPException(status_code=500, detail=f"服务器错误: {str(e)}")
 
 
-@app.post("/ai-reply-test/{cookie_id}")
+@router.post("/ai-reply-test/{cookie_id}")
 def test_ai_reply(cookie_id: str, test_data: dict, _: None = Depends(require_auth)):
     """测试AI回复功能"""
     try:
@@ -3717,7 +2004,7 @@ def test_ai_reply(cookie_id: str, test_data: dict, _: None = Depends(require_aut
 
 # ==================== 日志管理API ====================
 
-@app.get("/logs")
+@router.get("/logs")
 async def get_logs(lines: int = 200, level: str = None, source: str = None, _: None = Depends(require_auth)):
     """获取实时系统日志"""
     try:
@@ -3733,7 +2020,7 @@ async def get_logs(lines: int = 200, level: str = None, source: str = None, _: N
         return {"success": False, "message": f"获取日志失败: {str(e)}", "logs": []}
 
 
-@app.get("/risk-control-logs")
+@router.get("/risk-control-logs")
 async def get_risk_control_logs(
     cookie_id: str = None,
     limit: int = 100,
@@ -3768,7 +2055,7 @@ async def get_risk_control_logs(
         }
 
 
-@app.delete("/risk-control-logs/{log_id}")
+@router.delete("/risk-control-logs/{log_id}")
 async def delete_risk_control_log(
     log_id: int,
     admin_user: Dict[str, Any] = Depends(require_admin)
@@ -3791,7 +2078,7 @@ async def delete_risk_control_log(
         return {"success": False, "message": f"删除失败: {str(e)}"}
 
 
-@app.get("/logs/stats")
+@router.get("/logs/stats")
 async def get_log_stats(_: None = Depends(require_auth)):
     """获取日志统计信息"""
     try:
@@ -3804,7 +2091,7 @@ async def get_log_stats(_: None = Depends(require_auth)):
         return {"success": False, "message": f"获取日志统计失败: {str(e)}", "stats": {}}
 
 
-@app.post("/logs/clear")
+@router.post("/logs/clear")
 async def clear_logs(_: None = Depends(require_auth)):
     """清空日志"""
     try:
@@ -3819,7 +2106,7 @@ async def clear_logs(_: None = Depends(require_auth)):
 
 # ==================== 商品管理API ====================
 
-@app.post("/items/get-all-from-account")
+@router.post("/items/get-all-from-account")
 async def get_all_items_from_account(request: dict, _: None = Depends(require_auth)):
     """从指定账号获取所有商品信息"""
     try:
@@ -3837,7 +2124,7 @@ async def get_all_items_from_account(request: dict, _: None = Depends(require_au
             return {"success": False, "message": "账号cookie信息为空"}
 
         # 创建XianyuLive实例，传入正确的cookie_id
-        from XianyuAutoAsync import XianyuLive
+        from app.services.xianyu_async import XianyuLive
         xianyu_instance = XianyuLive(cookies_str, cookie_id)
 
         # 调用获取所有商品信息的方法（自动分页）
@@ -3866,7 +2153,7 @@ async def get_all_items_from_account(request: dict, _: None = Depends(require_au
         return {"success": False, "message": f"获取商品信息异常: {str(e)}"}
 
 
-@app.post("/items/get-by-page")
+@router.post("/items/get-by-page")
 async def get_items_by_page(request: dict, _: None = Depends(require_auth)):
     """从指定账号按页获取商品信息"""
     try:
@@ -3901,7 +2188,7 @@ async def get_items_by_page(request: dict, _: None = Depends(require_auth)):
             return {"success": False, "message": "账号cookies为空"}
 
         # 创建XianyuLive实例，传入正确的cookie_id
-        from XianyuAutoAsync import XianyuLive
+        from app.services.xianyu_async import XianyuLive
         xianyu_instance = XianyuLive(cookies_str, cookie_id)
 
         # 调用获取指定页商品信息的方法
@@ -3932,10 +2219,10 @@ async def get_items_by_page(request: dict, _: None = Depends(require_auth)):
 
 # ------------------------- 用户设置接口 -------------------------
 
-@app.get('/user-settings')
+@router.get('/user-settings')
 def get_user_settings(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的设置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         user_id = current_user['user_id']
         settings = db_manager.get_user_settings(user_id)
@@ -3943,10 +2230,10 @@ def get_user_settings(current_user: Dict[str, Any] = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put('/user-settings/{key}')
+@router.put('/user-settings/{key}')
 def update_user_setting(key: str, setting_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
     """更新用户设置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         user_id = current_user['user_id']
         value = setting_data.get('value')
@@ -3965,10 +2252,10 @@ def update_user_setting(key: str, setting_data: dict, current_user: Dict[str, An
         log_with_user('error', f"更新用户设置异常: {key} - {str(e)}", current_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get('/user-settings/{key}')
+@router.get('/user-settings/{key}')
 def get_user_setting(key: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取用户特定设置"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         user_id = current_user['user_id']
         setting = db_manager.get_user_setting(user_id, key)
@@ -3982,10 +2269,10 @@ def get_user_setting(key: str, current_user: Dict[str, Any] = Depends(get_curren
 
 # ------------------------- 管理员专用接口 -------------------------
 
-@app.get('/admin/users')
+@router.get('/admin/users')
 def get_all_users(admin_user: Dict[str, Any] = Depends(require_admin)):
     """获取所有用户信息（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         log_with_user('info', "查询所有用户信息", admin_user)
         users = db_manager.get_all_users()
@@ -4011,10 +2298,10 @@ def get_all_users(admin_user: Dict[str, Any] = Depends(require_admin)):
         log_with_user('error', f"获取用户信息失败: {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete('/admin/users/{user_id}')
+@router.delete('/admin/users/{user_id}')
 def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin)):
     """删除用户（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         # 不能删除管理员自己
         if user_id == admin_user['user_id']:
@@ -4043,7 +2330,7 @@ def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin
         log_with_user('error', f"删除用户异常: {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get('/admin/risk-control-logs')
+@router.get('/admin/risk-control-logs')
 async def get_admin_risk_control_logs(
     cookie_id: str = None,
     limit: int = 100,
@@ -4073,7 +2360,7 @@ async def get_admin_risk_control_logs(
         return {"success": False, "message": f"查询失败: {str(e)}", "data": [], "total": 0}
 
 
-@app.get('/admin/cookies')
+@router.get('/admin/cookies')
 def get_admin_cookies(admin_user: Dict[str, Any] = Depends(require_admin)):
     """获取所有Cookie信息（管理员专用）"""
     try:
@@ -4087,7 +2374,7 @@ def get_admin_cookies(admin_user: Dict[str, Any] = Depends(require_admin)):
             }
 
         # 获取所有用户的cookies
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         all_users = db_manager.get_all_users()
         all_cookies = []
 
@@ -4122,15 +2409,11 @@ def get_admin_cookies(admin_user: Dict[str, Any] = Depends(require_admin)):
         }
 
 
-@app.get('/admin/logs')
+@router.get('/admin/logs')
 def get_system_logs(admin_user: Dict[str, Any] = Depends(require_admin),
                    lines: int = 100,
                    level: str = None):
     """获取系统日志（管理员专用）"""
-    import os
-    import glob
-    from datetime import datetime
-
     try:
         log_with_user('info', f"查询系统日志，行数: {lines}, 级别: {level}", admin_user)
 
@@ -4186,10 +2469,10 @@ def get_system_logs(admin_user: Dict[str, Any] = Depends(require_admin),
         log_with_user('error', f"获取系统日志失败: {str(e)}", admin_user)
         return {"logs": [], "message": f"获取系统日志失败: {str(e)}", "success": False}
 
-@app.get('/admin/stats')
+@router.get('/admin/stats')
 def get_system_stats(admin_user: Dict[str, Any] = Depends(require_admin)):
     """获取系统统计信息（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         log_with_user('info', "查询系统统计信息", admin_user)
 
@@ -4235,13 +2518,13 @@ def get_system_stats(admin_user: Dict[str, Any] = Depends(require_admin)):
 
 # ------------------------- 指定商品回复接口 -------------------------
 
-@app.get("/itemReplays")
-def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
+@router.get("/itemReplays")
+def get_all_item_replies(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的所有商品回复信息"""
     try:
         # 只返回当前用户的商品信息
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         all_items = []
@@ -4253,13 +2536,13 @@ def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取商品回复信息失败: {str(e)}")
 
-@app.get("/itemReplays/cookie/{cookie_id}")
-def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+@router.get("/itemReplays/cookie/{cookie_id}")
+def get_item_replies_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定Cookie的商品信息"""
     try:
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         user_cookies = db_manager.get_all_cookies(user_id)
 
         if cookie_id not in user_cookies:
@@ -4272,7 +2555,7 @@ def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(g
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取商品信息失败: {str(e)}")
 
-@app.put("/item-reply/{cookie_id}/{item_id}")
+@router.put("/item-reply/{cookie_id}/{item_id}")
 def update_item_reply(
     cookie_id: str,
     item_id: str,
@@ -4284,7 +2567,7 @@ def update_item_reply(
     """
     try:
         user_id = current_user['user_id']
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
 
         # 验证cookie是否属于用户
         user_cookies = db_manager.get_all_cookies(user_id)
@@ -4304,7 +2587,7 @@ def update_item_reply(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新商品回复失败: {str(e)}")
 
-@app.delete("/item-reply/{cookie_id}/{item_id}")
+@router.delete("/item-reply/{cookie_id}/{item_id}")
 def delete_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     删除指定账号cookie_id和商品item_id的商品回复
@@ -4326,23 +2609,24 @@ def delete_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除商品回复失败: {str(e)}")
 
-class ItemToDelete(BaseModel):
+class ItemReplyToDelete(BaseModel):
     cookie_id: str
     item_id: str
 
-class BatchDeleteRequest(BaseModel):
-    items: List[ItemToDelete]
 
-@app.delete("/item-reply/batch")
+class ItemReplyBatchDeleteRequest(BaseModel):
+    items: List[ItemReplyToDelete]
+
+@router.delete("/item-reply/batch")
 async def batch_delete_item_reply(
-    req: BatchDeleteRequest,
+    req: ItemReplyBatchDeleteRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     批量删除商品回复
     """
     user_id = current_user['user_id']
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
 
     # 先校验当前用户是否有权限删除每个cookie对应的回复
     user_cookies = db_manager.get_all_cookies(user_id)
@@ -4356,7 +2640,7 @@ async def batch_delete_item_reply(
         "failed_count": result["failed_count"]
     }
 
-@app.get("/item-reply/{cookie_id}/{item_id}")
+@router.get("/item-reply/{cookie_id}/{item_id}")
 def get_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     获取指定账号cookie_id和商品item_id的商品回复内容
@@ -4386,18 +2670,14 @@ def get_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = 
 
 # ------------------------- 数据库备份和恢复接口 -------------------------
 
-@app.get('/admin/backup/download')
+@router.get('/admin/backup/download')
 def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)):
     """下载数据库备份文件（管理员专用）"""
-    import os
-    from fastapi.responses import FileResponse
-    from datetime import datetime
-
     try:
         log_with_user('info', "请求下载数据库备份", admin_user)
 
         # 使用db_manager的实际数据库路径
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         db_file_path = db_manager.db_path
 
         # 检查数据库文件是否存在
@@ -4423,15 +2703,10 @@ def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)
         log_with_user('error', f"下载数据库备份失败: {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post('/admin/backup/upload')
+@router.post('/admin/backup/upload')
 async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_admin),
                                 backup_file: UploadFile = File(...)):
     """上传并恢复数据库备份文件（管理员专用）"""
-    import os
-    import shutil
-    import sqlite3
-    from datetime import datetime
-
     try:
         log_with_user('info', f"开始上传数据库备份: {backup_file.filename}", admin_user)
 
@@ -4479,7 +2754,7 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
             raise HTTPException(status_code=400, detail="无效的数据库文件")
 
         # 备份当前数据库
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
         current_db_path = db_manager.db_path
 
         # 生成备份文件路径（与原数据库在同一目录）
@@ -4533,13 +2808,9 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
             os.remove(temp_file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get('/admin/backup/list')
+@router.get('/admin/backup/list')
 def list_backup_files(admin_user: Dict[str, Any] = Depends(require_admin)):
     """列出服务器上的备份文件（管理员专用）"""
-    import os
-    import glob
-    from datetime import datetime
-
     try:
         log_with_user('info', "查询备份文件列表", admin_user)
 
@@ -4577,10 +2848,10 @@ def list_backup_files(admin_user: Dict[str, Any] = Depends(require_admin)):
 
 # ------------------------- 数据管理接口 -------------------------
 
-@app.get('/admin/data/{table_name}')
+@router.get('/admin/data/{table_name}')
 def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require_admin)):
     """获取指定表的所有数据（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         log_with_user('info', f"查询表数据: {table_name}", admin_user)
 
@@ -4614,10 +2885,10 @@ def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require
         log_with_user('error', f"查询表数据失败: {table_name} - {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete('/admin/data/{table_name}/{record_id}')
+@router.delete('/admin/data/{table_name}/{record_id}')
 def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, Any] = Depends(require_admin)):
     """删除指定表的指定记录（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         log_with_user('info', f"删除表记录: {table_name}.{record_id}", admin_user)
 
@@ -4654,10 +2925,10 @@ def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, A
         log_with_user('error', f"删除表记录异常: {table_name}.{record_id} - {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete('/admin/data/{table_name}')
+@router.delete('/admin/data/{table_name}')
 def clear_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require_admin)):
     """清空指定表的所有数据（管理员专用）"""
-    from db_manager import db_manager
+    from app.repositories.db_manager import db_manager
     try:
         log_with_user('info', f"清空表数据: {table_name}", admin_user)
 
@@ -4697,11 +2968,11 @@ def clear_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requi
 
 
 # 商品多规格管理API
-@app.put("/items/{cookie_id}/{item_id}/multi-spec")
+@router.put("/items/{cookie_id}/{item_id}/multi-spec")
 def update_item_multi_spec(cookie_id: str, item_id: str, spec_data: dict, _: None = Depends(require_auth)):
     """更新商品的多规格状态"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
 
         is_multi_spec = spec_data.get('is_multi_spec', False)
 
@@ -4717,11 +2988,11 @@ def update_item_multi_spec(cookie_id: str, item_id: str, spec_data: dict, _: Non
 
 
 # 商品多数量发货管理API
-@app.put("/items/{cookie_id}/{item_id}/multi-quantity-delivery")
+@router.put("/items/{cookie_id}/{item_id}/multi-quantity-delivery")
 def update_item_multi_quantity_delivery(cookie_id: str, item_id: str, delivery_data: dict, _: None = Depends(require_auth)):
     """更新商品的多数量发货状态"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
 
         multi_quantity_delivery = delivery_data.get('multi_quantity_delivery', False)
 
@@ -4741,11 +3012,11 @@ def update_item_multi_quantity_delivery(cookie_id: str, item_id: str, delivery_d
 
 # ==================== 订单管理接口 ====================
 
-@app.get('/api/orders')
+@router.get('/api/orders')
 def get_user_orders(current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的订单信息"""
     try:
-        from db_manager import db_manager
+        from app.repositories.db_manager import db_manager
 
         user_id = current_user['user_id']
         log_with_user('info', "查询用户订单信息", current_user)

@@ -8,7 +8,7 @@ import json
 import time
 import aiohttp
 from loguru import logger
-from utils.xianyu_utils import generate_sign, trans_cookies
+from app.utils.xianyu_utils import generate_sign, trans_cookies
 
 
 class SecureConfirm:
@@ -47,7 +47,7 @@ class SecureConfirm:
     async def _get_real_item_id(self):
         """从数据库中获取一个真实的商品ID"""
         try:
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
             
             # 获取该账号的商品列表
             items = db_manager.get_items_by_cookie(self.cookie_id)
@@ -76,7 +76,7 @@ class SecureConfirm:
     async def _update_config_cookies(self):
         """更新数据库中的Cookie配置"""
         try:
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
             # 更新数据库中的cookies
             db_manager.update_cookie_value(self.cookie_id, self.cookies_str)
             logger.debug(f"【{self.cookie_id}】已更新数据库中的Cookie")

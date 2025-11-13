@@ -204,7 +204,7 @@ class OrderStatusHandler:
         logger.info(f"🔄 订单状态处理器.update_order_status开始: order_id={order_id}, new_status={new_status}, cookie_id={cookie_id}, context={context}")
         with self._lock:
             try:
-                from db_manager import db_manager
+                from app.repositories.db_manager import db_manager
                 
                 # 验证状态值是否有效
                 if new_status not in self.status_mapping:
@@ -712,7 +712,7 @@ class OrderStatusHandler:
             # 获取对应的状态（new_status已经在上面通过_check_refund_message或message_status_mapping确定了）
             
             # 检查当前订单状态，避免不合理的状态回退
-            from db_manager import db_manager
+            from app.repositories.db_manager import db_manager
             current_order = db_manager.get_order_by_id(order_id)
             
             # 如果订单存在，检查是否需要忽略这次状态更新
