@@ -13,7 +13,9 @@ from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
+from app.services.scheduler.listing_monitor_task import listing_monitor_task_service
 from app.services.scheduler_service import get_scheduler_service
+from common.services.account_cooldown import account_cooldown_manager
 from common.utils.time_utils import get_beijing_now_naive
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -22,6 +24,11 @@ router = APIRouter(prefix="/internal", tags=["internal"])
 class LogRetentionRequest(BaseModel):
     """日志保留天数刷新请求"""
     retention_days: int
+
+
+class AccountCooldownClearRequest(BaseModel):
+    """解除账号风控冷却请求"""
+    account_id: str
 
 
 @router.post("/logs/retention")
@@ -124,7 +131,7 @@ async def trigger_task(task_code: str):
     """
     try:
         # 验证任务代码
-        if task_code not in ["redelivery", "rate", "polish", "day_switch", "cleanup_browser_data", "fetch_orders", "fetch_pending_orders", "fetch_items", "login_renew", "cookies_refresh", "api_cookie_renew", "close_notice", "red_flower", "db_backup", "delivery_timeout"]:
+        if task_code not in ["redelivery", "rate", "polish", "day_switch", "cleanup_browser_data", "fetch_orders", "fetch_pending_orders", "fetch_refund_orders", "fetch_items", "login_renew", "token_renewal", "cookies_refresh", "api_cookie_renew", "close_notice", "red_flower", "db_backup", "delivery_timeout", "listing_monitor", "seller_fill", "dm_send", "auto_order"]:
             return {
                 "success": False,
                 "code": 400,
@@ -152,3 +159,78 @@ async def trigger_task(task_code: str):
             "message": f"触发任务执行失败: {str(e)}",
             "data": None,
         }
+
+
+@router.post("/account-cooldown/clear")
+async def clear_account_cooldown(request: AccountCooldownClearRequest):
+    """解除指定账号的风控冷却（如外部回传新 Cookie 后立即恢复该账号可用）。
+
+    冷却态仅存在于 scheduler 进程内存中，故由 backend-web 通过本内部接口跨进程触发解除。
+    """
+    try:
+        account_id = (request.account_id or "").strip()
+        if not account_id:
+            return {
+                "success": False,
+                "code": 400,
+                "message": "account_id 不能为空",
+                "data": None,
+            }
+        cleared = account_cooldown_manager.clear(account_id)
+        return {
+            "success": True,
+            "code": 200,
+            "message": "账号风控冷却已解除" if cleared else "该账号当前不在冷却期，无需解除",
+            "data": {"account_id": account_id, "cleared": cleared},
+        }
+    except Exception as e:
+        logger.error(f"[内部API] 解除账号风控冷却失败: {e}")
+        return {
+            "success": False,
+            "code": 500,
+            "message": f"解除账号风控冷却失败: {str(e)}",
+            "data": None,
+        }
+
+
+@router.post("/tasks/listing_monitor/run/{task_id}")
+async def run_listing_monitor_single(task_id: int):
+    """手动执行单个商品监控任务的采集（忽略间隔，立即执行一次，日志记为手动触发）"""
+    try:
+        result = await listing_monitor_task_service.run_single(task_id, trigger_type="manual")
+        return {
+            "success": bool(result.get("success")),
+            "code": 200 if result.get("success") else 400,
+            "message": result.get("message") or "",
+            "data": {"task_id": task_id, "triggered_at": get_beijing_now_naive().isoformat()},
+        }
+    except Exception as e:
+        logger.error(f"[内部API] 手动执行商品监控任务失败: {e}")
+        return {
+            "success": False,
+            "code": 500,
+            "message": f"手动执行商品监控任务失败: {str(e)}",
+            "data": None,
+        }
+
+
+@router.post("/system/self-restart")
+async def system_self_restart():
+    """
+    重启本服务（定时任务服务 / scheduler）
+
+    由 backend-web 的系统管理接口调用。自动识别运行环境：
+    - docker：本进程延迟自杀退出，容器 restart 策略自动拉起
+    - dev/frozen：派生脱离父进程的协调子进程，杀端口后重新拉起
+
+    先返回成功响应，再在后台触发重启。
+    """
+    from common.utils.service_restart import restart_service
+
+    result = restart_service("scheduler")
+    return {
+        "success": bool(result.get("success")),
+        "code": 200 if result.get("success") else 500,
+        "message": result.get("message") or "",
+        "data": {"mode": result.get("mode")},
+    }

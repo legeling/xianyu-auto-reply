@@ -22,6 +22,7 @@ const USERS_PREFIX = '/api/v1/users'
 const MENU_HIDDEN_SETTING_KEY = 'navigation.hidden_menu_keys'
 const READONLY_SYSTEM_SETTING_KEYS = ['runtime.is_exe_mode']
 const REMOVED_SYSTEM_SETTING_KEYS = ['auth.footer_ad_html', 'ad_price.carousel', 'ad_price.text']
+const INDEPENDENT_SYSTEM_SETTING_KEYS = ['password_login.mode', 'captcha.slider_mode']
 const DEFAULT_DISCLAIMER_SETTINGS: DisclaimerSettings = {
   'disclaimer.title': '免责声明',
   'disclaimer.content': '数据存储说明\n1. 本系统在运行过程中，为保障服务正常运行，会存储用户账号密码、登录 Cookie、商品信息、卡券信息等业务数据。\n2. 上述数据仅用于系统功能运行、自动化处理和业务管理，不作为其他用途。\n3. 请您自行确认服务器环境、账号权限和数据保管措施的安全性。\n\n用户须知\n1. 用户应确保使用本系统的行为符合相关平台规则和法律法规。\n2. 因用户自身违规操作、账号共享、密码泄露、服务器安全问题导致的损失，由用户自行承担。\n3. 建议用户定期备份重要数据，因系统故障、第三方平台变更、不可抗力等导致的异常或损失，本系统不承担责任。\n4. 本系统依赖第三方平台接口和网络环境，无法保证服务始终连续、稳定、无中断。\n\n隐私与风险提示\n1. 请勿在未充分评估风险的情况下接入生产环境或敏感账号。\n2. 使用本系统即表示您已充分理解并接受相关风险，并愿意自行承担相应责任。',
@@ -84,7 +85,11 @@ export const getPublicSystemSettings = async (): Promise<{ success: boolean; dat
 export const updateSystemSettings = async (data: Partial<SystemSettings>): Promise<ApiResponse> => {
   // 逐个更新设置项，确保 value 是字符串
   const promises = Object.entries(data)
-    .filter(([key]) => !READONLY_SYSTEM_SETTING_KEYS.includes(key) && !REMOVED_SYSTEM_SETTING_KEYS.includes(key))
+    .filter(([key]) => (
+      !READONLY_SYSTEM_SETTING_KEYS.includes(key)
+      && !REMOVED_SYSTEM_SETTING_KEYS.includes(key)
+      && !INDEPENDENT_SYSTEM_SETTING_KEYS.includes(key)
+    ))
     .map(([key, value]) => {
     // 将布尔值和数字转换为字符串
     let stringValue: string
@@ -340,6 +345,37 @@ export const changePassword = async (data: { current_password: string; new_passw
   return post(`${USERS_PREFIX}/change-password`, data)
 }
 
+// 获取当前登录用户信息（含到期日）
+export interface CurrentUserProfile {
+  id: number
+  username: string
+  email?: string
+  phone?: string
+  role?: string
+  status?: string
+  account_limit?: number | null
+  last_login_at?: string | null
+  expire_at?: string | null
+}
+
+export const getCurrentUserProfile = async (): Promise<CurrentUserProfile> => {
+  return get(`${USERS_PREFIX}/me`)
+}
+
+// 账户续期：按系统设置的续期单价扣减余额并延长到期日
+export interface RenewMembershipResult {
+  months: number
+  unit_price: string
+  total: string
+  balance_before: string
+  balance_after: string
+  expire_at: string | null
+}
+
+export const renewMembership = async (months: number): Promise<ApiResponse<RenewMembershipResult>> => {
+  return post(`${USERS_PREFIX}/renew`, { months })
+}
+
 // 获取备份文件列表（管理员）
 export const getBackupList = async (): Promise<{ backups: Array<{ filename: string; size: number; size_mb: number; modified_time: string }>; total: number }> => {
   return get(`${ADMIN_PREFIX}/backup/list`)
@@ -373,6 +409,11 @@ export const getUserSetting = async (key: string): Promise<{ success: boolean; v
 // 更新用户设置
 export const updateUserSetting = async (key: string, value: string, description?: string): Promise<ApiResponse> => {
   return put(`/api/v1/user-settings/${key}`, { value, description })
+}
+
+// 一键创建对接卡密秘钥（后端调用外部密钥服务创建并自动保存到当前用户）
+export const createCardSecretKey = async (): Promise<ApiResponse<{ key_value: string }>> => {
+  return post('/api/v1/user-settings/card-secret-key/create')
 }
 
 // 上传收款码

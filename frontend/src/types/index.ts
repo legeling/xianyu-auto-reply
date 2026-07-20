@@ -12,6 +12,8 @@ export interface User {
   role?: UserRole
   status?: UserStatus
   account_limit?: number | null
+  balance?: string | null
+  expire_at?: string | null
 }
 
 export interface LoginRequest {
@@ -140,6 +142,8 @@ export interface Order {
   is_bargain?: boolean  // 是否小刀
   is_rated?: boolean  // 是否已评价
   is_red_flower?: boolean  // 是否已求小红花
+  is_unregistered?: boolean  // 是否已请求注销接口
+  unregister_error_reason?: string  // 注销接口错误原因
   // 收货人信息
   receiver_name?: string  // 收货人姓名
   receiver_phone?: string  // 收货人手机号
@@ -174,7 +178,7 @@ export interface NotificationChannel {
   id: string
   cookie_id?: string
   name: string
-  type: 'dingtalk' | 'feishu' | 'bark' | 'email' | 'webhook' | 'wechat' | 'telegram'
+  type: 'dingtalk' | 'feishu' | 'bark' | 'email' | 'webhook' | 'wechat' | 'telegram' | 'pushplus'
   channel_type?: string
   channel_name?: string
   channel_config?: string
@@ -223,6 +227,8 @@ export interface ThemeFontSettings {
 }
 
 export type ThemeSettings = ThemeAppearanceSettings & ThemeFontSettings
+export type PasswordLoginMode = 'protocol' | 'browser'
+export type SliderMode = 'browser' | 'real_mouse'
 
 export interface SystemSettings {
   ai_model?: string
@@ -269,9 +275,15 @@ export interface SystemSettings {
   'log.retention_days'?: string
   // 账号安全设置
   'account.face_verify_timeout_disable'?: boolean
+  // 账号密码登录方式
+  'password_login.mode'?: PasswordLoginMode
+  'captcha.slider_mode'?: SliderMode
   // 代理设置
   'proxy.api_url'?: string
   'proxy.enabled'?: boolean
+  // 用户到期/续期设置
+  'user.renew_month_price'?: string
+  'user.register_default_days'?: string
   [key: string]: unknown
 }
 

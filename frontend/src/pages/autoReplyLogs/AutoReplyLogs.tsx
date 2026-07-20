@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Calendar, ChevronLeft, ChevronRight, MessageSquare, RefreshCw } from 'lucide-react'
 import { getAccountDetails } from '@/api/accounts'
 import { getAutoReplyLogs, type AutoReplyLogItem } from '@/api/autoReplyLogs'
@@ -50,6 +50,7 @@ const DECISION_REASON_LABELS: Record<string, string> = {
   failed: '处理失败',
   auto_delivery: '自动发货',
   chat_paused: '会话已暂停',
+  chat_paused_after_delay: '延迟后会话已暂停',
   empty_reply: '回复内容为空',
   default_reply_once: '默认回复仅回复一次',
 }
@@ -213,16 +214,6 @@ export function AutoReplyLogs() {
   useEffect(() => {
     loadLogs(1, pageSize)
   }, [])
-
-  // 切换消息类型时自动重新查询（跳过首次挂载，避免与初始查询重复）
-  const messageTypeMountedRef = useRef(false)
-  useEffect(() => {
-    if (!messageTypeMountedRef.current) {
-      messageTypeMountedRef.current = true
-      return
-    }
-    loadLogs(1, pageSize)
-  }, [messageType]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSearch = () => {
     loadLogs(1, pageSize)

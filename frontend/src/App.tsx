@@ -35,6 +35,7 @@ const Settings = React.lazy(() => import('@/pages/settings/Settings').then(m => 
 const MessageFilters = React.lazy(() => import('@/pages/messageFilters/MessageFilters').then(m => ({ default: m.MessageFilters })))
 const Feedback = React.lazy(() => import('@/pages/feedback/Feedback'))
 const Announcements = React.lazy(() => import('@/pages/announcements/Announcements').then(m => ({ default: m.Announcements })))
+const PopupAnnouncements = React.lazy(() => import('@/pages/announcements/PopupAnnouncements').then(m => ({ default: m.PopupAnnouncements })))
 const Tutorial = React.lazy(() => import('@/pages/tutorial/Tutorial').then(m => ({ default: m.Tutorial })))
 const ItemSearch = React.lazy(() => import('@/pages/search/ItemSearch').then(m => ({ default: m.ItemSearch })))
 const GoofishCompass = React.lazy(() => import('@/pages/compass/GoofishCompass').then(m => ({ default: m.GoofishCompass })))
@@ -61,6 +62,13 @@ const ProductPublish = React.lazy(() => import('@/pages/product-publish/ProductP
 const BatchPublish = React.lazy(() => import('@/pages/product-publish/BatchPublish').then(m => ({ default: m.BatchPublish })))
 const PublishAddresses = React.lazy(() => import('@/pages/product-publish/PublishAddresses').then(m => ({ default: m.PublishAddresses })))
 const PublishLogs = React.lazy(() => import('@/pages/product-publish/PublishLogs').then(m => ({ default: m.PublishLogs })))
+const ListingMonitor = React.lazy(() => import('@/pages/product-monitor/ListingMonitor').then(m => ({ default: m.ListingMonitor })))
+const MonitorOverview = React.lazy(() => import('@/pages/product-monitor/MonitorOverview').then(m => ({ default: m.MonitorOverview })))
+const MonitorCategory = React.lazy(() => import('@/pages/product-monitor/MonitorCategory').then(m => ({ default: m.MonitorCategory })))
+const MonitorLogs = React.lazy(() => import('@/pages/product-monitor/MonitorLogs').then(m => ({ default: m.MonitorLogs })))
+const MonitorItems = React.lazy(() => import('@/pages/product-monitor/MonitorItems').then(m => ({ default: m.MonitorItems })))
+const OrderFallbackAccount = React.lazy(() => import('@/pages/product-monitor/OrderFallbackAccount').then(m => ({ default: m.OrderFallbackAccount })))
+const CollectFallbackAccount = React.lazy(() => import('@/pages/product-monitor/CollectFallbackAccount').then(m => ({ default: m.CollectFallbackAccount })))
 
 // 管理员页面懒加载
 const Users = React.lazy(() => import('@/pages/admin/Users').then(m => ({ default: m.Users })))
@@ -79,6 +87,8 @@ const PolishBatches = React.lazy(() => import('@/pages/polishLogs/PolishBatches'
 const PolishBatchDetailPage = React.lazy(() => import('@/pages/polishLogs/PolishBatchDetail').then(m => ({ default: m.PolishBatchDetailPage })))
 const LoginRenewBatches = React.lazy(() => import('@/pages/loginRenewLogs/LoginRenewBatches').then(m => ({ default: m.LoginRenewBatches })))
 const LoginRenewBatchDetailPage = React.lazy(() => import('@/pages/loginRenewLogs/LoginRenewBatchDetail').then(m => ({ default: m.LoginRenewBatchDetailPage })))
+const TokenRenewalBatches = React.lazy(() => import('@/pages/tokenRenewalLogs/TokenRenewalBatches').then(m => ({ default: m.TokenRenewalBatches })))
+const TokenRenewalBatchDetailPage = React.lazy(() => import('@/pages/tokenRenewalLogs/TokenRenewalBatchDetail').then(m => ({ default: m.TokenRenewalBatchDetailPage })))
 const CookiesRefreshBatches = React.lazy(() => import('@/pages/cookiesRefreshLogs/CookiesRefreshBatches').then(m => ({ default: m.CookiesRefreshBatches })))
 const CookiesRefreshBatchDetailPage = React.lazy(() => import('@/pages/cookiesRefreshLogs/CookiesRefreshBatchDetail').then(m => ({ default: m.CookiesRefreshBatchDetailPage })))
 const ApiCookieRenewBatches = React.lazy(() => import('@/pages/apiCookieRenewLogs/ApiCookieRenewBatches').then(m => ({ default: m.ApiCookieRenewBatches })))
@@ -355,6 +365,14 @@ function App() {
             <Route path="product-publish/batch" element={<BatchPublish />} />
             <Route path="product-publish/addresses" element={<PublishAddresses />} />
             <Route path="product-publish/logs" element={<PublishLogs />} />
+            {/* 商品监控 */}
+            <Route path="product-monitor/overview" element={<MonitorOverview />} />
+            <Route path="product-monitor/categories" element={<MonitorCategory />} />
+            <Route path="product-monitor/listing" element={<ListingMonitor />} />
+            <Route path="product-monitor/logs" element={<MonitorLogs />} />
+            <Route path="product-monitor/items" element={<MonitorItems />} />
+            <Route path="product-monitor/order-fallback-accounts" element={<OrderFallbackAccount />} />
+            <Route path="product-monitor/collect-fallback-accounts" element={<CollectFallbackAccount />} />
             <Route path="personal-settings" element={<PersonalSettings />} />
             <Route path="blacklist" element={<Blacklist />} />
             <Route path="settings" element={<Settings />} />
@@ -380,6 +398,8 @@ function App() {
             <Route path="admin/polish-batches/:batchId" element={<PolishBatchDetailPage />} />
             <Route path="admin/login-renew-batches" element={<LoginRenewBatches />} />
             <Route path="admin/login-renew-batches/:batchId" element={<LoginRenewBatchDetailPage />} />
+            <Route path="admin/token-renewal-batches" element={<TokenRenewalBatches />} />
+            <Route path="admin/token-renewal-batches/:batchId" element={<TokenRenewalBatchDetailPage />} />
             <Route path="admin/cookies-refresh-batches" element={<CookiesRefreshBatches />} />
             <Route path="admin/cookies-refresh-batches/:batchId" element={<CookiesRefreshBatchDetailPage />} />
             <Route path="admin/api-cookie-renew-batches" element={<ApiCookieRenewBatches />} />
@@ -390,6 +410,7 @@ function App() {
             <Route path="admin/red-flower-batches/:batchId" element={<RedFlowerBatchDetailPage />} />
             <Route path="admin/scheduled-tasks" element={<ScheduledTasks />} />
             <Route path="admin/announcements" element={<Announcements />} />
+            <Route path="admin/popup-announcements" element={<PopupAnnouncements />} />
           </Route>
 
           {/* Catch all */}

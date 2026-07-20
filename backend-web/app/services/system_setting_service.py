@@ -55,6 +55,22 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
     # api_url 默认空字符串表示未配置；enabled 默认 false 表示不启用
     "proxy.api_url": ("", "代理 API 的 URL（可能较长，用于配置外部代理服务）"),
     "proxy.enabled": ("false", "是否启用代理（true/false）"),
+    # 用户到期/续期设置
+    # renew_month_price：续期一个月的价格（元），空表示未配置（续期功能不可用）
+    # register_default_days：注册用户默认有效天数，空表示注册不设置到期日（永不过期）
+    "user.renew_month_price": ("", "用户续期一个月的价格（元），空=未配置"),
+    "user.register_default_days": ("", "注册用户默认有效天数（空=不设置到期日）"),
+    # real_mouse 过滑块本地/远程排队权重（默认 1:1，多来源同时排队时按比例放行）
+    "captcha.real_mouse_weight_local": ("1", "real_mouse过滑块本地排队权重"),
+    "captcha.real_mouse_weight_remote": ("1", "real_mouse过滑块远程排队权重"),
+    "captcha.block_remote_calls": ("true", "是否禁止外部远程调用backend-web过滑块接口"),
+    "captcha.local_slider_disabled": ("false", "本机滑块是否停止处理并仅使用Token缓存"),
+    "captcha.remote_processing_max": ("20", "远程调用允许的最大处理中滑块日志数，0=不限制"),
+    "captcha.remote_cooldown_seconds": ("600", "远程调用达到处理中上限后的冷却秒数，0=不冷却"),
+    "captcha.remote_cooldown_until": ("0", "远程过滑块调用冷却截止时间戳"),
+    "captcha.slider_mode": ("browser", "滑块滑动方式：browser/real_mouse"),
+    # 账号密码登录模式：protocol-协议登录 / browser-浏览器登录
+    "password_login.mode": ("browser", "账号密码登录模式：protocol/browser"),
 }
 
 # 不需要XSS转义的键（布尔值、数字等）
@@ -88,9 +104,28 @@ NO_ESCAPE_KEYS = {
     "withdraw.min_amount",
     "log.retention_days",
     "account.face_verify_timeout_disable",
+    # 用户到期/续期设置：均为数字字符串，无需 XSS 转义
+    "user.renew_month_price",
+    "user.register_default_days",
     # 代理设置：URL 含 :、/、?、&、= 等字符不能被 XSS 转义；布尔字符串"true"/"false"也无需转义
     "proxy.api_url",
     "proxy.enabled",
+    # 远程过滑块配置：URL 含 :// 等字符、秘钥为随机串，均不能被 XSS 转义
+    "captcha.remote_service_url",
+    "captcha.remote_secret_key",
+    # 是否传递账号Cookie：布尔字符串"true"/"false"，无需转义
+    "captcha.remote_pass_cookies",
+    "captcha.block_remote_calls",
+    "captcha.local_slider_disabled",
+    "captcha.remote_processing_max",
+    "captcha.remote_cooldown_seconds",
+    "captcha.remote_cooldown_until",
+    "captcha.slider_mode",
+    # real_mouse 排队权重：数字字符串，无需 XSS 转义
+    "captcha.real_mouse_weight_local",
+    "captcha.real_mouse_weight_remote",
+    # 账号密码登录模式：枚举字符串，无需转义
+    "password_login.mode",
 }
 
 
@@ -126,6 +161,16 @@ class SystemSettingService:
             if not include_sensitive and entry.key in SENSITIVE_KEYS:
                 continue
             settings[entry.key] = entry.value
+        password_login_mode = str(settings.get("password_login.mode") or "").strip().lower()
+        settings["password_login.mode"] = (
+            password_login_mode
+            if password_login_mode in {"protocol", "browser"}
+            else "browser"
+        )
+        slider_mode = str(settings.get("captcha.slider_mode") or "").strip().lower()
+        settings["captcha.slider_mode"] = (
+            slider_mode if slider_mode in {"browser", "real_mouse"} else "browser"
+        )
         return settings
 
     async def set_setting(self, key: str, value: str, description: str | None = None) -> None:
@@ -145,4 +190,38 @@ class SystemSettingService:
             record = SystemSetting(key=key, value=safe_value, description=safe_description)
 
         self.session.add(record)
+        await self.session.commit()
+
+    async def set_settings(self, settings: Dict[str, tuple[str, str | None]]) -> None:
+        """在同一事务中批量保存系统设置。
+
+        Args:
+            settings: ``{设置键: (设置值, 设置说明)}`` 映射。
+
+        Returns:
+            无返回值；全部设置成功后统一提交。
+        """
+        if not settings:
+            return
+
+        stmt = select(SystemSetting).where(SystemSetting.key.in_(tuple(settings.keys())))
+        result = await self.session.execute(stmt)
+        records = {record.key: record for record in result.scalars().all()}
+
+        for key, (value, description) in settings.items():
+            safe_value = value if key in NO_ESCAPE_KEYS else escape_xss(value)
+            safe_description = escape_xss(description) if description else None
+            record = records.get(key)
+            if record:
+                record.value = safe_value
+                if description is not None:
+                    record.description = safe_description
+            else:
+                record = SystemSetting(
+                    key=key,
+                    value=safe_value,
+                    description=safe_description,
+                )
+            self.session.add(record)
+
         await self.session.commit()

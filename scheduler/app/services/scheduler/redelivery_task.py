@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from loguru import logger
-from sqlalchemy import select, update as sql_update
+from sqlalchemy import delete as sql_delete, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.db.session import async_session_maker
@@ -160,6 +160,9 @@ class RedeliveryTask:
     # 订单处理间隔（秒）
     ORDER_PROCESS_DELAY = 1.0
     
+    # 补发货日志保留天数，超过该天数的日志在每次任务执行时主动清理
+    LOG_RETENTION_DAYS = 10
+    
     async def execute(self) -> str:
         """
         执行补发货任务
@@ -175,6 +178,9 @@ class RedeliveryTask:
         
         try:
             async with async_session_maker() as session:
+                # 主动清理过期的补发货日志（10天前）
+                await self._cleanup_expired_logs(session)
+                
                 # 获取符合条件的账号
                 accounts = await self._get_eligible_accounts(session)
                 
@@ -644,6 +650,25 @@ class RedeliveryTask:
                                 f"[定时补发货] 订单 {order_no} 写入多数量退化提示失败: {warn_err}"
                             )
 
+                    # 卡券疑似被平台风控拦截未送达：internal API 已等待闲鱼服务端回执判定，
+                    # 并把拦截原因写入订单 delivery_fail_reason。订单已标记 shipped（库存已扣，
+                    # 不自动重发以免资损/再次被同一风控拦截，下轮也不会再捞取），
+                    # 这里把补发货批次日志记为失败（返回 success=False），提示人工核实买家是否收到。
+                    if result_data.get('send_intercepted'):
+                        intercept_reason = (
+                            result_data.get('send_intercept_reason')
+                            or "卡券疑似被平台风控拦截未送达，请人工核实买家是否收到"
+                        )
+                        # 若同时存在多数量退化提示，合并写入，避免外层覆盖 delivery_fail_reason 时丢失
+                        final_reason = (
+                            f"{degraded_warn_msg}；{intercept_reason}" if degraded_warn_msg else intercept_reason
+                        )
+                        logger.warning(
+                            f"[定时补发货] 订单 {order_no} 卡券疑似被平台拦截，"
+                            f"已标记发货但批次日志记为失败: {final_reason}"
+                        )
+                        return False, final_reason, cookie_string
+
                     logger.info(f"[定时补发货] 订单 {order_no} 发货成功")
                     return True, None, cookie_string
                 else:
@@ -809,6 +834,31 @@ class RedeliveryTask:
         result = await session.execute(stmt)
         return result.scalars().first()
     
+    async def _cleanup_expired_logs(self, session: AsyncSession) -> None:
+        """
+        主动清理过期的补发货日志
+
+        删除 created_at 早于 (当前北京时间 - LOG_RETENTION_DAYS 天) 的日志记录，
+        避免日志表无限增长。使用参数化的 ORM delete 语句，避免 SQL 注入。
+        """
+        try:
+            cutoff_time = get_beijing_now_naive() - timedelta(days=self.LOG_RETENTION_DAYS)
+            stmt = sql_delete(ScheduledRedeliveryLog).where(
+                ScheduledRedeliveryLog.created_at < cutoff_time
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+
+            deleted_count = result.rowcount or 0
+            if deleted_count > 0:
+                logger.info(
+                    f"[定时补发货] 已清理 {deleted_count} 条 {self.LOG_RETENTION_DAYS} 天前的补发货日志"
+                    f"（清理时间界限: {cutoff_time}）"
+                )
+        except Exception as e:
+            logger.error(f"[定时补发货] 清理过期日志失败: {e}")
+            await session.rollback()
+
     async def _log_result(
         self,
         session: AsyncSession,

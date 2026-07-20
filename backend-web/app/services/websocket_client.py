@@ -7,11 +7,13 @@ WebSocket 服务客户端
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
 from app.core.config import get_settings
 from app.core.http_client import get_http_client
+from common.services.captcha.remote_timeout import get_remote_solve_timeout
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -76,7 +78,7 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/restart"
         try:
-            response = await self.http_client.post(url)
+            response = await self.http_client.post(url, json={})
             return response
         except Exception as e:
             logger.error(f"重启账号任务失败: {account_id}, 错误: {e}")
@@ -238,6 +240,84 @@ class WebSocketServiceClient:
         except Exception as e:
             logger.error(f"取消订单失败: {order_no}, 错误: {e}")
             return {"success": False, "message": f"取消订单失败: {str(e)}"}
+
+
+    async def solve_captcha(self, account_id: str, url: str, browser_timeout: int = 40,
+                            call_type: str = "remote", call_user: str | None = None,
+                            cookies: str = "", device_id: str = "",
+                            extended_queue_timeout: bool = False,
+                            precreated_log_id: int | None = None) -> dict:
+        """调用 websocket 服务独立过滑块（模式B：仅凭 punish 链接求解）。
+
+        注意：过滑块（含重试/看门狗）耗时可能达数十秒，远超共享 http_client 的 30s 超时，
+        故此处使用独立的 aiohttp 会话并放宽超时，避免 backend 端提前超时。
+
+        Args:
+            account_id: 外部账号标识（仅用于日志/浏览器实例隔离）
+            url: punish 验证链接
+            browser_timeout: 单次浏览器超时（秒）
+            call_type: 调用类型（local/remote），用于风控日志
+            call_user: 调用用户名（远程调用按秘钥查到），用于风控日志
+            cookies: 可选账号 Cookie（调用方开启"传递Cookie"开关时传入），链接过期时凭此重取新链接
+            device_id: 可选设备 ID，配合 cookies 重新请求 token 接口使用
+            extended_queue_timeout: 是否为真人鼠标远程接口预留串行排队时间；默认关闭，
+                避免改变 login、聊天等现有调用的失败等待时间
+            precreated_log_id: backend-web 在 Redis 准入锁内预先创建的风控日志 ID
+
+        Returns:
+            websocket 返回的响应字典（success / data.engine / data.cookies）
+        """
+        import aiohttp
+
+        endpoint = f"{self.base_url}/internal/captcha/solve"
+        request_not_sent_errors = (aiohttp.ClientConnectorError, aiohttp.InvalidURL)
+        connection_timeout_error = getattr(aiohttp, "ConnectionTimeoutError", None)
+        if connection_timeout_error is not None:
+            request_not_sent_errors += (connection_timeout_error,)
+        total_timeout = (
+            get_remote_solve_timeout(browser_timeout)
+            if extended_queue_timeout
+            else max(90, int(browser_timeout) + 60)
+        )
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=total_timeout, connect=10)
+            ) as session:
+                async with session.post(endpoint, json={
+                    "account_id": account_id,
+                    "url": url,
+                    "browser_timeout": int(browser_timeout),
+                    "call_type": call_type,
+                    "call_user": call_user,
+                    "cookies": cookies or "",
+                    "device_id": device_id or "",
+                    "risk_log_id": precreated_log_id,
+                }) as resp:
+                    return await resp.json(content_type=None)
+        except request_not_sent_errors as e:
+            logger.error(f"无法连接过滑块服务: account_id={account_id}, 错误: {e}")
+            return {
+                "success": False,
+                "message": f"无法连接过滑块服务: {str(e)}",
+                "_request_not_sent": True,
+            }
+        except asyncio.TimeoutError:
+            logger.error(
+                f"过滑块服务等待超时: account_id={account_id}, "
+                f"总超时={total_timeout:.0f}秒"
+            )
+            return {
+                "success": False,
+                "message": f"过滑块服务等待超时（{total_timeout:.0f}秒）",
+                "_request_status_unknown": True,
+            }
+        except Exception as e:
+            logger.error(f"过滑块失败: account_id={account_id}, 错误: {e}")
+            return {
+                "success": False,
+                "message": f"过滑块失败: {str(e)}",
+                "_request_status_unknown": True,
+            }
 
 
 # 全局客户端实例

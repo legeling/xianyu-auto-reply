@@ -13,11 +13,14 @@ from common.utils.auth_scope import resolve_owner_scope
 from common.utils.default_reply_api import validate_api_url, normalize_api_timeout
 from common.schemas.item import (
     ItemBatchDeleteRequest,
+    ItemBatchOfflineRequest,
     ItemFullFetchRequest,
     ItemPageFetchRequest,
 )
+from common.services.item_offline_service import batch_offline_items_from_xianyu
 from app.services.account_service import AccountService
 from app.services.item_service import ItemService
+from app.services.selectable_item_service import SelectableItemService
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +139,43 @@ async def list_items_paginated(
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
     }
+
+
+@items_router.get("/selectable/all")
+async def list_selectable_items_all(
+    keyword: str | None = Query(default=None, max_length=255, description="关键字（商品ID/标题）"),
+    current_user: User = Depends(deps.get_current_active_user),
+    session: AsyncSession = Depends(deps.get_db_session),
+):
+    """卡券关联商品选择弹窗：获取全部匹配的可选商品轻量项（供「全选筛选结果」）
+
+    仅返回 item_id/title/price 轻字段，管理员可查看所有商品。
+    """
+    owner_id, _ = resolve_owner_scope(current_user)
+    items = await SelectableItemService(session).get_all_selectable_item_keys(
+        owner_id=owner_id,
+        search=keyword or "",
+    )
+    return {"list": items, "total": len(items)}
+
+
+@items_router.get("/by-card/{card_id}")
+async def list_items_by_card(
+    card_id: int,
+    current_user: User = Depends(deps.get_current_active_user),
+    session: AsyncSession = Depends(deps.get_db_session),
+):
+    """卡券关联商品选择弹窗：获取卡券已关联商品的轻量详情（供右侧「已选商品」展示）
+
+    仅返回 item_id/title/price；已删除商品不在此返回，选中态由
+    GET /cards/{card_id}/items 提供，保存时不丢失。
+    """
+    owner_id, _ = resolve_owner_scope(current_user)
+    items = await SelectableItemService(session).get_associated_items(
+        card_id=card_id,
+        owner_id=owner_id,
+    )
+    return {"list": items, "total": len(items)}
 
 
 @items_router.get("/cookie/{cookie_id}")
@@ -694,6 +734,46 @@ async def update_item_multi_quantity_delivery(
     return ApiResponse(success=True, message=f"商品多数量发货状态已{status_text}")
 
 
+class ItemDeleteRequest(PydanticBaseModel):
+    """统一删除商品请求（账号可选）
+
+    - cookie_id 传入：按账号删除（校验归属）；
+    - cookie_id 不传：商品所属账号仍存在则要求指定账号，账号已删除（孤儿商品）则直接按商品ID删除。
+    """
+    item_id: str
+    cookie_id: str | None = None
+
+
+@items_router.delete("/delete", response_model=ApiResponse)
+async def delete_item_unified(
+    payload: ItemDeleteRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
+) -> ApiResponse:
+    """删除商品（统一入口，账号可选，兼容账号已删除的孤儿商品）
+
+    - 传入 cookie_id：校验账号归属后按账号删除；账号不存在直接报错。
+    - 未传 cookie_id：若商品所属账号仍存在则要求指定账号；账号已删除（孤儿商品）则按商品ID删除。
+    """
+    owner_id, _ = resolve_owner_scope(current_user)
+
+    account = None
+    # 将 "null"、空字符串等无效值统一视为未传入 cookie_id
+    cookie_id = payload.cookie_id
+    if cookie_id and cookie_id.lower() not in ("null", ""):
+        account = await account_service.get_account_for_user(owner_id, cookie_id)
+        if not account:
+            return ApiResponse(success=False, message="账号不存在")
+
+    result = await item_service.delete_item_smart(owner_id, payload.item_id, account)
+    if result == "ok":
+        return ApiResponse(success=True, message="商品已删除")
+    if result == "account_required":
+        return ApiResponse(success=False, message="该商品所属账号仍存在，请指定账号后再删除")
+    return ApiResponse(success=False, message="商品不存在")
+
+
 @items_router.delete("/{cookie_id}/{item_id}", response_model=ApiResponse)
 async def delete_item(
     cookie_id: str,
@@ -728,21 +808,70 @@ async def batch_delete_items(
     accounts = await account_service.list_accounts(owner_id)
     account_map = {account.account_id: account for account in accounts}
     removed = 0
-    not_found_accounts = []
     not_found_items = []
     for entry in payload.items:
-        account = account_map.get(entry.cookie_id)
-        if not account:
-            not_found_accounts.append(entry.cookie_id)
-            continue
-        if await item_service.delete_item(account, entry.item_id):
+        # 将 "null"、空字符串等无效 cookie_id 视为未指定账号（孤儿商品场景）
+        cookie_id = entry.cookie_id
+        account = None
+        if cookie_id and cookie_id.lower() not in ("null", ""):
+            account = account_map.get(cookie_id)
+
+        # 使用 delete_item_smart 统一处理，兼容孤儿商品
+        result = await item_service.delete_item_smart(owner_id, entry.item_id, account)
+        if result == "ok":
             removed += 1
         else:
             not_found_items.append(entry.item_id)
-    logger.info(f"批量删除商品: 请求={len(payload.items)}, 成功={removed}, 账号未找到={not_found_accounts}, 商品未找到={not_found_items}")
+    logger.info(f"批量删除商品: 请求={len(payload.items)}, 成功={removed}, 商品未找到={not_found_items}")
     if removed == 0 and len(payload.items) > 0:
         return ApiResponse(success=False, message=f"未能删除任何商品（共 {len(payload.items)} 个），请检查商品是否存在")
     return ApiResponse(success=True, message=f"已删除 {removed} 个商品")
+
+
+@items_router.post("/batch-offline", response_model=ApiResponse)
+async def batch_offline_items(
+    payload: ItemBatchOfflineRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+) -> ApiResponse:
+    """批量下架商品（调用闲鱼接口，使用所选账号的Cookie）
+
+    下架 ≠ 删除：商品在卖家后台下架后仍可重新上架，本接口不改动本地商品库记录。
+    所选账号必须是这些商品的归属账号，否则闲鱼会对不属于该账号的商品返回失败。
+    """
+    # 管理员可操作所有账号，普通用户只能操作自己的账号
+    owner_id, _ = resolve_owner_scope(current_user)
+
+    if not payload.item_ids:
+        return ApiResponse(success=False, message="请选择要下架的商品")
+
+    account = await account_service.get_account_for_user(owner_id, payload.cookie_id)
+    if not account:
+        return ApiResponse(success=False, message="账号不存在")
+    if not account.cookie:
+        return ApiResponse(success=False, message="该账号未登录（Cookie为空），无法下架")
+
+    result = await batch_offline_items_from_xianyu(
+        account.account_id, account.cookie, payload.item_ids
+    )
+    suc_count = result.get("suc_count", 0)
+    fail_count = result.get("fail_count", 0)
+    logger.info(
+        f"批量下架商品: 账号={account.account_id}, 请求={len(payload.item_ids)}, "
+        f"成功={suc_count}, 失败={fail_count}"
+    )
+
+    data = {"results": result.get("results", []), "suc_count": suc_count, "fail_count": fail_count}
+    # 全部失败：透传闲鱼返回的失败原因，便于前端展示
+    if suc_count == 0:
+        return ApiResponse(
+            success=False,
+            message=result.get("message") or "下架失败",
+            data=data,
+        )
+    # 部分/全部成功
+    message = f"已下架 {suc_count} 个商品" + (f"，{fail_count} 个失败" if fail_count else "")
+    return ApiResponse(success=True, message=message, data=data)
 
 
 @items_router.post("/get-by-page")

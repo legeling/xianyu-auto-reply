@@ -13,6 +13,13 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from common.services.captcha.concurrency import run_browser_task
+from common.services.captcha.slider_mode import (
+    SLIDER_MODE_REAL_MOUSE,
+    refresh_slider_mode_from_database,
+)
+from common.services.captcha.weighted_runner import real_mouse_weighted_runner
+
 router = APIRouter(prefix="/internal", tags=["internal"])
 
 
@@ -26,6 +33,9 @@ class SendMessageRequest(BaseModel):
     """发送消息请求"""
     chat_id: str
     message: str
+    # 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）。默认 False 保持既有调用方零影响。
+    wait_result: bool = False
+    wait_timeout: float = 10.0
 
 
 class DeliverOrderRequest(BaseModel):
@@ -68,6 +78,19 @@ class CreateChatRequest(BaseModel):
 class LogRetentionRequest(BaseModel):
     """日志保留天数刷新请求"""
     retention_days: int
+
+
+class SolveCaptchaRequest(BaseModel):
+    """过滑块请求（模式B：仅凭 punish 链接求解，不依赖账号/数据库）"""
+    account_id: str = ""          # 外部标识，仅用于日志与浏览器实例隔离
+    url: str                      # punish 验证链接（punish?x5secdata=...）
+    browser_timeout: int = 40     # 单次浏览器超时（秒）
+    call_type: str = "remote"     # 调用类型：local-本机 / remote-远程
+    call_user: str | None = None  # 调用用户（远程调用按秘钥查到的用户名）
+    cookies: str = ""             # 可选：账号 Cookie（调用方开启"传递Cookie"开关时传入）。
+                                  # 传入后链接过期时可凭此 Cookie 重取新链接继续处理。
+    device_id: str = ""           # 可选：设备 ID，配合 cookies 重新请求 token 接口使用
+    risk_log_id: int | None = None # backend-web 准入锁内预先创建的风控日志 ID
 
 
 @router.post("/logs/retention")
@@ -214,13 +237,13 @@ async def stop_account(account_id: str):
 
 
 @router.post("/accounts/{account_id}/restart")
-async def restart_account(account_id: str, request: StartAccountRequest):
+async def restart_account(account_id: str, request: StartAccountRequest = None):
     """
     重启账号任务
     
     Args:
         account_id: 账号ID
-        request: 启动请求参数
+        request: 启动请求参数(可选，不传则从数据库获取Cookie)
         
     Returns:
         操作结果
@@ -228,7 +251,16 @@ async def restart_account(account_id: str, request: StartAccountRequest):
     try:
         from app.services.xianyu.cookie_manager import get_manager
         from loguru import logger
-        
+
+        # 请求体可选：未携带时使用空请求，统一从数据库获取Cookie
+        if request is None:
+            request = StartAccountRequest()
+
+        # 实际用于启动任务的 Cookie 与所属用户：
+        # 优先用请求携带的值，未携带时回退数据库（避免重启时把空 Cookie 传给任务导致"未提供cookies"）
+        cookie_str = request.cookie_value
+        resolved_user_id = request.user_id
+
         # 重启前清除Token缓存，确保重新获取Token和完整Cookie
         # 注意：xy_token_cache.user_id 存的是闲鱼的 unb（myid），不是 cookie_id(account_id)
         # 因此必须先从 Cookie 中解析出 unb 再作为 user_id 参数删除
@@ -238,18 +270,19 @@ async def restart_account(account_id: str, request: StartAccountRequest):
             from common.utils.xianyu_utils import trans_cookies
             from sqlalchemy import text
 
-            # 1) 优先用请求携带的 cookie_value，其次回退数据库查询
-            cookie_str = request.cookie_value
+            # 1) 请求未携带 Cookie 时，回退数据库查询（同时取账号归属用户）
             if not cookie_str:
                 try:
                     account = await get_account_by_identity(
                         account_id,
                         owner_id=request.user_id,
                     )
-                    cookie_str = account.cookie if account else None
+                    if account:
+                        cookie_str = account.cookie
+                        if resolved_user_id is None:
+                            resolved_user_id = account.owner_id
                 except Exception as query_e:
-                    logger.warning(f"查询账号Cookie用于清除Token缓存失败: {query_e}")
-                    cookie_str = None
+                    logger.warning(f"查询账号Cookie失败: {query_e}")
 
             # 2) 解析 unb
             unb = ""
@@ -278,11 +311,11 @@ async def restart_account(account_id: str, request: StartAccountRequest):
         manager = get_manager()
         # 先停止
         manager.remove_cookie(account_id)
-        # 再启动
+        # 再启动（使用解析后的 Cookie 与归属用户，避免空 Cookie 启动失败）
         manager.add_cookie(
             cookie_id=account_id,
-            cookie_value=request.cookie_value,
-            user_id=request.user_id
+            cookie_value=cookie_str,
+            user_id=resolved_user_id
         )
         logger.info(f"账号任务重启成功: {account_id}")
         
@@ -302,6 +335,202 @@ async def restart_account(account_id: str, request: StartAccountRequest):
             "message": f"重启账号任务失败: {str(e)}",
             "data": None,
         }
+
+
+@router.post("/captcha/solve")
+async def solve_captcha(request: SolveCaptchaRequest):
+    """过滑块（独立/无状态）：仅凭传入的 punish 链接求解滑块。
+
+    模式B：不依赖账号是否运行、不查数据库、不注入/回填 cookies。
+    成功返回解出的 x5* cookies，失败直接返回 success=false（供外部系统使用）。
+    远程调用会记录风控日志（call_type=remote，call_user=调用用户）。
+    """
+    import re
+    import time as _time
+    from loguru import logger
+
+    url = (request.url or "").strip()
+    if not url:
+        return {"success": False, "code": 400, "message": "punish 链接不能为空", "data": None}
+
+    # 清洗 account_id（外部传入，仅用于日志与浏览器实例目录隔离，防止路径注入）
+    raw_id = (request.account_id or "external").strip()
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", raw_id)[:64] or "external"
+    timeout = max(20, min(int(request.browser_timeout or 40), 120))
+    call_type = (request.call_type or "remote").strip() or "remote"
+    call_user = (request.call_user or "").strip() or None
+
+    # 记录风控日志（处理中）
+    log_id = request.risk_log_id if request.risk_log_id and request.risk_log_id > 0 else None
+    start_ts = _time.time()
+    if not log_id:
+        try:
+            from common.db.compat import db_manager
+            log_id = db_manager.add_risk_control_log(
+                cookie_id=safe_id,
+                event_type="slider_captcha",
+                event_description=f"触发场景: 远程过滑块接口, URL: {url}",
+                processing_status="processing",
+                call_type=call_type,
+                call_user=call_user,
+            )
+        except Exception as log_e:
+            logger.error(f"【过滑块接口】记录风控日志失败: {log_e}")
+
+    def _update_log(
+        status: str,
+        result: str,
+        engine: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not log_id:
+            return
+        try:
+            from common.db.compat import db_manager as _dm
+            kwargs = {"processing_status": status, "processing_result": result}
+            if engine is not None:
+                kwargs["captcha_engine"] = engine
+            if error is not None:
+                kwargs["error_message"] = error
+            _dm.update_risk_control_log(log_id=log_id, **kwargs)
+        except Exception as ue:
+            logger.error(f"【过滑块接口】更新风控日志失败: {ue}")
+
+    try:
+        from app.services.captcha.slider_stealth import run_slider_verification_with_fallback
+
+        # 若调用方传入了账号 Cookie（开启了"传递Cookie"开关）：
+        #   - 把 Cookie 作为 existing_cookies_str 提供给兜底引擎注入；
+        #   - 构造 url_provider，遇到"抱歉，页面访问出现了问题"（链接过期）时凭 Cookie 重取新链接，
+        #     与本机处理滑块的逻辑保持一致。
+        # 未传 Cookie 时保持原模式B：链接过期或失败直接判失败（cookies="" / url_provider=None）。
+        existing_cookies_str = (request.cookies or "").strip()
+        device_id = (request.device_id or "").strip()
+        url_provider = None
+        refetched_token_result: dict[str, object] = {}
+        if existing_cookies_str:
+            from common.services.captcha.token_refetch import request_fresh_captcha_url
+            from app.services.captcha.slider_stealth import CAPTCHA_NOT_REQUIRED
+            from common.utils.xianyu_utils import trans_cookies
+
+            try:
+                _cookies_dict = trans_cookies(existing_cookies_str)
+            except Exception:
+                _cookies_dict = {}
+
+            def _remote_url_provider():
+                """凭传入的 Cookie 重新请求 token 接口，拿到新鲜验证链接（远程端链接过期兜底）。"""
+                res = request_fresh_captcha_url(safe_id, _cookies_dict, existing_cookies_str, device_id)
+                refetched_token_result.clear()
+                refetched_token_result.update(res)
+                if res.get("token_ok"):
+                    # 风控已解除、无需滑块：返回哨兵，让上层提前结束滑块流程
+                    return CAPTCHA_NOT_REQUIRED
+                return res.get("fresh_url")
+
+            url_provider = _remote_url_provider
+            logger.info(f"【过滑块接口】account_id={safe_id} 已携带 Cookie，启用链接过期自动重取")
+
+        # 被调用接口不信任请求体中的 call_type，所有请求固定进入远程桶，避免伪装成本地权重。
+        # 远程内部默认无 Cookie 优先；任一队首等待满70秒后按最早入队优先。
+        weight_class = "remote_cookie" if existing_cookies_str else "remote"
+        slider_args = (
+            safe_id, url, True, False, timeout, existing_cookies_str, url_provider,
+        )
+        selected_slider_mode = await refresh_slider_mode_from_database()
+        if selected_slider_mode == SLIDER_MODE_REAL_MOUSE:
+            # 被调用方请求在线程池之前参与本地/远程实时加权排队。
+            success, cookies, engine = await real_mouse_weighted_runner.submit(
+                weight_class,
+                run_slider_verification_with_fallback,
+                *slider_args,
+                weight_class=weight_class,
+                slider_mode=selected_slider_mode,
+            )
+        else:
+            success, cookies, engine = await run_browser_task(
+                run_slider_verification_with_fallback,
+                *slider_args,
+                weight_class=weight_class,
+                slider_mode=selected_slider_mode,
+            )
+    except Exception as e:
+        logger.error(f"【过滑块接口】account_id={safe_id} 执行异常: {e}")
+        _update_log(
+            "error",
+            f"过滑块执行异常，耗时: {_time.time() - start_ts:.2f}秒",
+            error=str(e),
+        )
+        return {
+            "success": False,
+            "code": 500,
+            "message": f"过滑块执行异常: {str(e)}",
+            "data": None,
+            "_risk_log_id": log_id,
+        }
+
+    duration = _time.time() - start_ts
+    if success and not cookies and refetched_token_result.get("token_ok"):
+        refreshed_cookies = refetched_token_result.get("new_cookies")
+        if not isinstance(refreshed_cookies, dict):
+            refreshed_cookies = {}
+        _update_log(
+            "success",
+            f"重取验证链接时Token已可用，无需滑块，耗时: {duration:.2f}秒",
+            engine=engine,
+        )
+        return {
+            "success": True,
+            "code": 200,
+            "message": "Token已可用，无需滑块",
+            "data": {
+                "engine": engine,
+                "cookies": refreshed_cookies,
+                "token_already_available": True,
+                "url_expired": False,
+            },
+            "_risk_log_id": log_id,
+        }
+    if success and cookies:
+        _update_log(
+            "success",
+            f"远程过滑块成功，耗时: {duration:.2f}秒",
+            engine=engine,
+        )
+        return {
+            "success": True, "code": 200, "message": "过滑块成功",
+            "data": {
+                "engine": engine,
+                "cookies": cookies,
+                "url_expired": False,
+            },
+            "_risk_log_id": log_id,
+        }
+    # 验证链接已过期：明确告知调用方刷新URL后重试（区别于普通过滑块失败）
+    # 注意：url_expired 不是"通过引擎"，不写入 captcha_engine 字段（避免污染引擎枚举/前端展示），
+    # 过期信息体现在 processing_result 文案与返回体 data 中即可。
+    if engine == "url_expired":
+        _update_log(
+            "failed",
+            f"远程过滑块失败(验证链接已过期)，耗时: {duration:.2f}秒",
+        )
+        return {
+            "success": False, "code": 200, "message": "验证链接已过期，请刷新URL后重试",
+            "data": {"engine": engine, "url_expired": True},
+            "_risk_log_id": log_id,
+        }
+    _update_log(
+        "failed",
+        f"远程过滑块失败，耗时: {duration:.2f}秒",
+        engine=engine,
+    )
+    return {
+        "success": False,
+        "code": 200,
+        "message": "过滑块失败",
+        "data": {"engine": engine, "url_expired": False},
+        "_risk_log_id": log_id,
+    }
 
 
 @router.get("/accounts/connection-stats")
@@ -401,15 +630,43 @@ async def send_message(account_id: str, request: SendMessageRequest):
             }
         
         # 发送消息
-        await instance.send_msg(
+        send_result = await instance.send_msg(
             websocket=instance.ws,
             chat_id=request.chat_id,
             send_user_id=None,  # 由实例内部获取
-            content=request.message
+            content=request.message,
         )
-        
-        logger.info(f"【{account_id}】消息发送成功: chat_id={request.chat_id}")
-        
+
+        # WebSocket 发送层失败：直接判失败
+        if not isinstance(send_result, dict) or not send_result.get("success"):
+            err = send_result.get("error_message") if isinstance(send_result, dict) else None
+            return {
+                "success": False,
+                "code": 500,
+                "message": f"消息发送失败: {err or '未知错误'}",
+                "data": {"send_status": "failed", "send_fail_reason": err},
+            }
+
+        # 可选：等待服务端响应，识别是否被安全拦截（CSI_FORBID 等）
+        send_status = "unknown"
+        send_fail_reason = None
+        if request.wait_result:
+            try:
+                reason = await instance.wait_send_reject_reason(
+                    send_result.get("send_future"),
+                    send_result.get("mid"),
+                    request.wait_timeout,
+                )
+                if reason:
+                    send_status = "failed"
+                    send_fail_reason = reason
+                else:
+                    send_status = "success"
+            except Exception as wait_e:  # noqa: BLE001
+                logger.warning(f"【{account_id}】等待发送结果异常: {wait_e}")
+
+        logger.info(f"【{account_id}】消息发送成功: chat_id={request.chat_id}, send_status={send_status}")
+
         return {
             "success": True,
             "code": 200,
@@ -418,6 +675,8 @@ async def send_message(account_id: str, request: SendMessageRequest):
                 "account_id": account_id,
                 "chat_id": request.chat_id,
                 "message": request.message,
+                "send_status": send_status,
+                "send_fail_reason": send_fail_reason,
             },
         }
     except Exception as e:
@@ -488,6 +747,67 @@ async def cancel_order(request: CancelOrderRequest):
     return {"success": True, "code": 200, "message": "订单已取消", "data": {"order_no": request.order_no}}
 
 
+async def _record_delivery_log(
+    cookie_id: str,
+    order_no: str,
+    chat_id: str,
+    item_id: str | None,
+    delivery_method: str,
+    send_status: str,
+    send_fail_reason: str | None = None,
+    delivery_content: str = "",
+) -> None:
+    """记录定时/手动发货的消息日志（reply_strategy=auto_delivery）
+
+    与实时自动发货日志格式保持一致，让前端"发送状态"列能统一展示。
+
+    Args:
+        cookie_id: 账号ID
+        order_no: 订单号
+        chat_id: 会话ID
+        item_id: 商品ID
+        delivery_method: 发货方式（manual/scheduled）
+        send_status: 发送状态（success/failed）
+        send_fail_reason: 失败原因（成功时传None）
+        delivery_content: 发货内容（用于日志展示）
+    """
+    try:
+        from app.services.xianyu.auto_reply_log_service import AutoReplyLogService
+        from common.utils.time_utils import get_beijing_now_naive
+
+        # 发货方式中文标签（与前端筛选口径一致）
+        method_label = {"manual": "手动", "scheduled": "定时", "auto": "自动"}.get(
+            delivery_method, delivery_method
+        )
+        log_payload = {
+            "sender_user_id": "system",
+            "sender_user_name": "系统发货",
+            "source_message": f"[{method_label}发货] 订单: {order_no}",
+            "chat_id": chat_id,
+            "item_id": item_id,
+            "order_no": order_no,
+            "msg_time": get_beijing_now_naive(),
+            "process_status": "success" if send_status == "success" else "failed",
+            "decision_reason": "auto_delivery",
+            "reply_strategy": "auto_delivery",
+            "reply_mode": "text",
+            "reply_text": delivery_content[:200] if delivery_content else "",
+            "error_message": send_fail_reason,
+            "send_status": send_status,
+            "send_fail_reason": send_fail_reason,
+            "context_snapshot": {
+                "delivery_method": delivery_method,
+                "order_id": order_no,
+            },
+        }
+
+        log_service = AutoReplyLogService(cookie_id)
+        await log_service.record_message(log_payload)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"【内部API】写入{delivery_method}发货消息日志失败: {e}")
+
+
 @router.post("/orders/deliver")
 async def deliver_order(request: DeliverOrderRequest):
     """
@@ -515,7 +835,8 @@ async def deliver_order(request: DeliverOrderRequest):
         from common.db.session import async_session_maker
         from sqlalchemy import select
         from common.models.card import Card
-        
+        from app.services.xianyu.auto_delivery_handler import SEND_BEFORE_CONFIRM_WAIT_TIMEOUT
+
         logger.info(f"【内部API】收到订单发货请求: order_no={request.order_no}, 发货方式={request.delivery_method}")
         
         # 根据订单号获取账号ID
@@ -988,6 +1309,9 @@ async def deliver_order(request: DeliverOrderRequest):
         final_contents: list[str] = []
         failed_indices: list[int] = []
         early_break_reason: str | None = None  # 库存不足 / api 失败导致提前结束的原因
+        # 收集每条文本消息的发送结果（含 send_future / mid），循环结束后统一等待闲鱼服务端回执，
+        # 识别异步风控拦截（CSI_FORBID 等）。图片消息无回执 future，不参与拦截判定。
+        send_results: list = []
 
         for i in range(quantity):
             # ---- 1. 获取本张卡密的原始内容 ----
@@ -1081,7 +1405,8 @@ async def deliver_order(request: DeliverOrderRequest):
                         ws,
                         request.chat_id,
                         request.buyer_id,
-                        rendered
+                        rendered,
+                        send_results=send_results
                     )
                     final_contents.append(rendered)
                     send_ok = True
@@ -1114,9 +1439,44 @@ async def deliver_order(request: DeliverOrderRequest):
         send_failed_count = len(failed_indices)
         send_success_count = actual_count - send_failed_count
 
+        # ============ 等待闲鱼服务端回执，识别异步风控拦截（CSI_FORBID 等） ============
+        # send_msg 的 await websocket.send() 只保证消息写出到长连接即返回成功，
+        # 闲鱼对违规内容的拦截响应是异步回来的（按 mid 匹配 send_future）。
+        # 这里统一等待本次所有文本消息的回执，被拦截则视为"疑似未送达"，
+        # 后续标记订单已发货 + 写拦截警告（库存已扣，不自动重发以免资损/再次被拦）。
+        card_intercept_reason: str | None = None
+        try:
+            waiters = [
+                (r.get("send_future"), r.get("mid"))
+                for r in send_results
+                if isinstance(r, dict) and r.get("send_future") is not None
+            ]
+            wait_fn = getattr(xianyu_live, "wait_send_reject_reason", None)
+            if callable(wait_fn) and waiters:
+                wait_results = await asyncio.gather(
+                    *(wait_fn(send_future, mid, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT)
+                      for send_future, mid in waiters),
+                    return_exceptions=True,
+                )
+                reasons: list[str] = []
+                for r in wait_results:
+                    if isinstance(r, Exception):
+                        logger.warning(f"【内部API】等待卡券服务端回执异常: {r}")
+                        continue
+                    if r:
+                        reasons.append(r)
+                if reasons:
+                    # 去重保序
+                    card_intercept_reason = "；".join(dict.fromkeys(reasons))
+                    logger.warning(
+                        f"【内部API】订单 {request.order_no} 卡券疑似被平台拦截未送达: {card_intercept_reason}"
+                    )
+        except Exception as wait_err:
+            logger.warning(f"【内部API】等待卡券服务端回执失败（不影响发货主流程）: {wait_err}")
+
         # ============ "卡券发送成功再确认发货"模式：卡券已发送，现在执行确认发货 ============
         send_before_confirm_fail_msg: str | None = None
-        if send_before_confirm_mode and send_success_count > 0 and send_failed_count == 0:
+        if send_before_confirm_mode and send_success_count > 0 and send_failed_count == 0 and not card_intercept_reason:
             logger.info(f"【内部API】卡券全部发送成功，开始执行确认发货: order_no={request.order_no}")
             if xianyu_live.is_auto_confirm_enabled():
                 # 先执行免拼（如果是小刀订单）
@@ -1146,6 +1506,9 @@ async def deliver_order(request: DeliverOrderRequest):
             else:
                 send_before_confirm_fail_msg = "⚠️ 卡券已发送成功，但自动确认发货已关闭，请手动确认发货"
                 logger.info(f"【内部API】自动确认发货已关闭，卡券已发送但跳过确认发货: order_no={request.order_no}")
+        elif send_before_confirm_mode and card_intercept_reason:
+            send_before_confirm_fail_msg = f"⚠️ 卡券疑似被平台拦截未送达（{card_intercept_reason}），已跳过确认发货，请人工核实买家是否收到后再手动确认发货"
+            logger.warning(f"【内部API】{send_before_confirm_fail_msg}，order_no={request.order_no}")
         elif send_before_confirm_mode and send_failed_count > 0:
             send_before_confirm_fail_msg = f"⚠️ 卡券发送存在失败（{send_failed_count}张），已跳过确认发货，请检查买家是否收到完整内容后手动确认发货"
             logger.warning(f"【内部API】卡券发送存在失败（{send_failed_count}张），跳过确认发货: order_no={request.order_no}")
@@ -1192,6 +1555,20 @@ async def deliver_order(request: DeliverOrderRequest):
             if warn_parts:
                 partial_warn_msg = "；".join(warn_parts)
 
+        # 拦截警告：send_before_confirm 模式已在上面单独出 send_before_confirm_fail_msg，避免重复，
+        # 此处仅在非 send_before_confirm 模式下构造。intercept_written_msg 统一记录本次实际写入的
+        # 拦截文案（供响应回传给调用方，scheduler 据此把同一文案写回 delivery_fail_reason，保持一致）。
+        intercept_warn_msg: str | None = None
+        if card_intercept_reason and not send_before_confirm_mode:
+            intercept_warn_msg = (
+                f"⚠️ 卡券疑似被平台风控拦截未送达（{card_intercept_reason}），"
+                f"请人工核实买家是否收到，未收到请手动补发"
+            )
+        intercept_written_msg: str | None = (
+            send_before_confirm_fail_msg if (card_intercept_reason and send_before_confirm_mode)
+            else intercept_warn_msg
+        )
+
         try:
             from common.services.order_service import OrderService
             async with async_session_maker() as db_session:
@@ -1218,12 +1595,14 @@ async def deliver_order(request: DeliverOrderRequest):
                         f"【内部API】订单 {request.order_no} 状态已更新为已发货（共 {actual_count} 张）"
                     )
                 # 在状态更新之后写 fail_reason 提示（避免被 update_order_delivery_info 内部清空）
-                # 合并所有需要写入的 fail_reason（partial_warn_msg + send_before_confirm_fail_msg）
+                # 合并所有需要写入的 fail_reason（partial_warn_msg + send_before_confirm_fail_msg + intercept_warn_msg）
                 combined_fail_reasons = []
                 if partial_warn_msg:
                     combined_fail_reasons.append(partial_warn_msg)
                 if send_before_confirm_fail_msg:
                     combined_fail_reasons.append(send_before_confirm_fail_msg)
+                if intercept_warn_msg:
+                    combined_fail_reasons.append(intercept_warn_msg)
                 if combined_fail_reasons:
                     final_fail_reason = "；".join(combined_fail_reasons)
                     await order_service.update_order_delivery_fail_reason(
@@ -1288,6 +1667,33 @@ async def deliver_order(request: DeliverOrderRequest):
         # 在 success_msg 末尾追加部分异常说明（库存不足 / 发送失败），让前端调用方一眼看到
         if partial_warn_msg:
             success_msg = f"{success_msg}（{partial_warn_msg}）"
+        # 追加拦截提示，让手动发货弹窗（backend-web 直接复用本 message）也能看到
+        if intercept_written_msg:
+            success_msg = f"{success_msg}（{intercept_written_msg}）"
+
+        # ============ 写入发货消息日志（与实时自动发货一致，供"发送状态"列展示） ============
+        # 拦截判定已在上方同步完成，此处可直接定终态：发送层失败 / 平台拦截 → failed，否则 success。
+        if send_failed_count > 0:
+            log_send_status = "failed"
+            log_fail_reason = (
+                f"共 {send_failed_count} 张消息发送失败（第 {','.join(map(str, failed_indices))} 张），请手动补发"
+            )
+        elif card_intercept_reason:
+            log_send_status = "failed"
+            log_fail_reason = intercept_written_msg or card_intercept_reason
+        else:
+            log_send_status = "success"
+            log_fail_reason = None
+        await _record_delivery_log(
+            cookie_id=account_id,
+            order_no=request.order_no,
+            chat_id=request.chat_id,
+            item_id=request.item_id,
+            delivery_method=request.delivery_method,
+            send_status=log_send_status,
+            send_fail_reason=log_fail_reason,
+            delivery_content=combined_content,
+        )
 
         response_data = {
             "order_no": request.order_no,
@@ -1314,6 +1720,11 @@ async def deliver_order(request: DeliverOrderRequest):
             "send_failed_indices": failed_indices,
             # 提前结束原因（库存不足 / api 中途失败），None 表示循环走完未提前结束
             "early_break_reason": early_break_reason,
+            # 卡券是否疑似被平台风控拦截未送达（已等待闲鱼服务端回执判定）。
+            # True 时订单仍按平台状态标记，但 send_intercept_reason 已写入 delivery_fail_reason，
+            # 调用方（scheduler）应据此把补发货批次日志记为失败，提示人工核实。
+            "send_intercepted": bool(card_intercept_reason),
+            "send_intercept_reason": intercept_written_msg,
         }
         if card.type == 'image':
             # 兼容旧字段：单张图片场景仍返回 image_url
@@ -1896,3 +2307,25 @@ async def create_chat(account_id: str, request: CreateChatRequest):
             "message": f"创建会话异常: {str(e)}",
             "data": None
         }
+
+
+@router.post("/system/self-restart")
+async def system_self_restart():
+    """
+    重启本服务（消息服务 / websocket）
+
+    由 backend-web 的系统管理接口调用。自动识别运行环境：
+    - docker：本进程延迟自杀退出，容器 restart 策略自动拉起
+    - dev/frozen：派生脱离父进程的协调子进程，杀端口后重新拉起
+
+    先返回成功响应，再在后台触发重启。
+    """
+    from common.utils.service_restart import restart_service
+
+    result = restart_service("websocket")
+    return {
+        "success": bool(result.get("success")),
+        "code": 200 if result.get("success") else 500,
+        "message": result.get("message") or "",
+        "data": {"mode": result.get("mode")},
+    }

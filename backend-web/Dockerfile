@@ -14,6 +14,7 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y curl ca-certificates gcc \
+    fonts-dejavu-core fonts-liberation \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,6 +31,7 @@ open('/tmp/requirements.txt','w').write('\n'.join(deps))" && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
 RUN python -m playwright install --with-deps chromium
+RUN python -m patchright install --with-deps chromium
 
 # 创建日志目录
 RUN mkdir -p /app/backend-web/logs /app/static/uploads

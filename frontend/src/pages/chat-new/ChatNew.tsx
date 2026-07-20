@@ -88,6 +88,8 @@ export function ChatNew() {
   const [sending, setSending] = useState(false)
   // 发送图片：隐藏的文件选择框引用
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const [pendingImage, setPendingImage] = useState<{ file: File; previewUrl: string } | null>(null)
+  const pendingImageRef = useRef<{ file: File; previewUrl: string } | null>(null)
 
   // 当前客户订单与快捷短语
   const [customerOrders, setCustomerOrders] = useState<CustomerOrder[]>([])
@@ -115,6 +117,10 @@ export function ChatNew() {
 
   // 手动管理 WebSocket 连接的账号列表（仅用户显式操作时加入，页面刷新不自动重连）
   const [wsAccountIds, setWsAccountIds] = useState<string[]>([])
+
+  // 手机端 Tab 切换（桌面端 md+ 仍为四栏并排，本 state 不影响桌面布局）
+  type MobileTab = 'accounts' | 'convs' | 'chat' | 'tools'
+  const [mobileTab, setMobileTab] = useState<MobileTab>('accounts')
 
   const requestConfirm = useCallback((options: {
     title?: string
@@ -313,6 +319,8 @@ export function ChatNew() {
         await loadAccounts()
         setActiveAccountId(accountId)
         setWsAccountIds((prev) => prev.includes(accountId) ? prev : [...prev, accountId])
+        // 手机端：连接成功后自动切到"会话"Tab（桌面端不受影响）
+        setMobileTab('convs')
       } else {
         addToast({ message: res.message || '连接失败', type: 'error' })
       }
@@ -333,6 +341,8 @@ export function ChatNew() {
         setConversations([])
         setActiveCid('')
         setMessages([])
+        // 手机端：当前账号被断开后回到"账号"Tab
+        setMobileTab('accounts')
       }
       await loadAccounts()
     } catch (e: any) {
@@ -346,6 +356,8 @@ export function ChatNew() {
       setActiveAccountId(acc.account_id)
       // 选中已连接账号时也建立 WebSocket（页面刷新后首次选中时触发）
       setWsAccountIds((prev) => prev.includes(acc.account_id) ? prev : [...prev, acc.account_id])
+      // 手机端：选中已连接账号后切到"会话"Tab
+      setMobileTab('convs')
     } else {
       await handleConnect(acc.account_id)
     }
@@ -557,6 +569,8 @@ export function ChatNew() {
   // 选中会话时：优先从缓存恢复消息，无缓存才加载
   const handleSelectConversation = (cid: string) => {
     setActiveCid(cid)
+    // 手机端：选中会话后切到"聊天"Tab
+    setMobileTab('chat')
     // 清零该会话的未读数
     setConversations((prev) =>
       prev.map((c) => (c.cid === cid ? { ...c, unreadCount: 0 } : c)),
@@ -864,65 +878,158 @@ export function ChatNew() {
     }
   }
 
-  const handleSendMessage = () => sendMessageText(inputText, true)
-
   // ==================== 发送图片 ====================
+  const clearPendingImage = useCallback(() => {
+    setPendingImage((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl)
+      return null
+    })
+  }, [])
+
+  useEffect(() => {
+    pendingImageRef.current = pendingImage
+  }, [pendingImage])
+
+  useEffect(() => () => {
+    if (pendingImageRef.current) URL.revokeObjectURL(pendingImageRef.current.previewUrl)
+  }, [])
+
+  useEffect(() => {
+    clearPendingImage()
+  }, [activeAccountId, activeCid, clearPendingImage])
+
+  const getClipboardImageFileName = (type: string) => {
+    const extMap: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+      'image/gif': 'gif',
+    }
+    return `clipboard-${Date.now()}.${extMap[type] || 'png'}`
+  }
+
   const handlePickImage = () => {
     if (sending) return
     imageInputRef.current?.click()
+  }
+
+  const validateImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      addToast({ message: '请选择图片文件', type: 'error' })
+      return false
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      addToast({ message: '图片大小不能超过10MB', type: 'error' })
+      return false
+    }
+    return true
+  }
+
+  const sendImageFile = async (file: File) => {
+    if (!file || !activeAccountId || !activeCid || sending) return false
+
+    if (!validateImageFile(file)) return false
+
+    const conv = conversations.find((c) => c.cid === activeCid)
+    if (!conv) {
+      addToast({ message: '未找到当前会话信息', type: 'error' })
+      return false
+    }
+
+    setSending(true)
+    try {
+      const res = await sendImageMessage(activeAccountId, activeCid, conv.otherUserId, file)
+      // 成功用CDN地址；失败则用本地预览地址，保证用户都能看到所发图片
+      const displayUrl = res.success && res.data?.imageUrl ? res.data.imageUrl : URL.createObjectURL(file)
+      // 无论成功失败，都把这条图片消息展示在聊天记录中
+      const sentMsg: ChatMessage = {
+        messageId: res.data?.messageId || '',
+        senderId: activeAccountId,
+        senderName: '',
+        isSelf: true,
+        type: 'image',
+        text: '',
+        images: [displayUrl],
+        time: Date.now(),
+        failed: !res.success,
+        failReason: res.success ? undefined : (res.message || '发送失败'),
+      }
+      setMessages((prev) => [...prev, sentMsg])
+      if (res.success) {
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.cid === activeCid
+              ? { ...c, lastMessageSummary: '[图片]', lastMessageTime: sentMsg.time }
+              : c,
+          ),
+        )
+      } else {
+        addToast({ message: res.message || '发送失败', type: 'error' })
+      }
+      return res.success
+    } catch (e: any) {
+      const failReason = e?.message || '发送失败'
+      const displayUrl = URL.createObjectURL(file)
+      const sentMsg: ChatMessage = {
+        messageId: '',
+        senderId: activeAccountId,
+        senderName: '',
+        isSelf: true,
+        type: 'image',
+        text: '',
+        images: [displayUrl],
+        time: Date.now(),
+        failed: true,
+        failReason,
+      }
+      setMessages((prev) => [...prev, sentMsg])
+      addToast({ message: failReason, type: 'error' })
+      return false
+    } finally {
+      setSending(false)
+    }
   }
 
   const handleImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     // 选完即清空 value，保证同一张图片可重复选择触发 onChange
     e.target.value = ''
-    if (!file || !activeAccountId || !activeCid || sending) return
+    if (!file) return
+    await sendImageFile(file)
+  }
 
-    if (!file.type.startsWith('image/')) {
-      addToast({ message: '请选择图片文件', type: 'error' })
+  const handlePasteImage = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items || [])
+    const imageItem = items.find((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    if (!imageItem) return
+
+    e.preventDefault()
+    const blob = imageItem.getAsFile()
+    if (!blob) {
+      addToast({ message: '读取剪贴板图片失败', type: 'error' })
       return
     }
-    if (file.size > 10 * 1024 * 1024) {
-      addToast({ message: '图片大小不能超过10MB', type: 'error' })
+
+    const file = new File([blob], getClipboardImageFileName(blob.type), {
+      type: blob.type || 'image/png',
+      lastModified: Date.now(),
+    })
+    if (!validateImageFile(file)) return
+
+    setPendingImage((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl)
+      return { file, previewUrl: URL.createObjectURL(file) }
+    })
+  }
+
+  const handleSendMessage = async () => {
+    if (pendingImage) {
+      const file = pendingImage.file
+      clearPendingImage()
+      await sendImageFile(file)
       return
     }
-
-    const conv = conversations.find((c) => c.cid === activeCid)
-    if (!conv) {
-      addToast({ message: '未找到当前会话信息', type: 'error' })
-      return
-    }
-
-    setSending(true)
-    const res = await sendImageMessage(activeAccountId, activeCid, conv.otherUserId, file)
-    // 成功用CDN地址；失败则用本地预览地址，保证用户都能看到所发图片
-    const displayUrl = res.success && res.data?.imageUrl ? res.data.imageUrl : URL.createObjectURL(file)
-    // 无论成功失败，都把这条图片消息展示在聊天记录中
-    const sentMsg: ChatMessage = {
-      messageId: res.data?.messageId || '',
-      senderId: activeAccountId,
-      senderName: '',
-      isSelf: true,
-      type: 'image',
-      text: '',
-      images: [displayUrl],
-      time: Date.now(),
-      failed: !res.success,
-      failReason: res.success ? undefined : (res.message || '发送失败'),
-    }
-    setMessages((prev) => [...prev, sentMsg])
-    if (res.success) {
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.cid === activeCid
-            ? { ...c, lastMessageSummary: '[图片]', lastMessageTime: sentMsg.time }
-            : c,
-        ),
-      )
-    } else {
-      addToast({ message: res.message || '发送失败', type: 'error' })
-    }
-    setSending(false)
+    sendMessageText(inputText, true)
   }
 
   // ==================== 时间格式化 ====================
@@ -943,10 +1050,47 @@ export function ChatNew() {
   }
 
   // ==================== 渲染 ====================
+  // 手机端各 Tab 对应未读 / 状态提示
+  const totalUnread = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0)
+  const tabItems: Array<{ key: MobileTab; label: string; badge?: number; disabled?: boolean }> = [
+    { key: 'accounts', label: '账号' },
+    { key: 'convs', label: '会话', badge: totalUnread, disabled: !activeAccountId },
+    { key: 'chat', label: '聊天', disabled: !activeCid },
+    { key: 'tools', label: '工作区', disabled: !activeCid },
+  ]
+
   return (
-    <div className="flex h-[calc(100vh-120px)] gap-3">
+    <div className="flex flex-col h-[calc(100vh-120px)]">
+      {/* 手机端顶部 Tab 切换栏（桌面端隐藏） */}
+      <div className="md:hidden mb-2 flex bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+        {tabItems.map((item) => {
+          const active = mobileTab === item.key
+          return (
+            <button
+              key={item.key}
+              type="button"
+              disabled={item.disabled}
+              onClick={() => setMobileTab(item.key)}
+              className={`flex-1 py-2 text-xs font-medium transition-colors relative ${
+                active
+                  ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/40'
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
+            >
+              {item.label}
+              {item.badge && item.badge > 0 ? (
+                <span className="absolute top-1 right-1/2 translate-x-6 bg-red-500 text-white text-[10px] rounded-full px-1 min-w-[16px] text-center">
+                  {item.badge > 99 ? '99+' : item.badge}
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="flex flex-1 min-h-0 flex-col md:flex-row gap-3">
       {/* 左侧：账号列表 */}
-      <div className="w-56 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col">
+      <div className={`${mobileTab === 'accounts' ? 'flex' : 'hidden'} md:flex w-full md:w-56 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col min-h-0`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <span className="font-medium text-sm text-gray-700 dark:text-gray-300">账号列表</span>
           <button
@@ -1055,7 +1199,7 @@ export function ChatNew() {
       </div>
 
       {/* 中间：会话列表 */}
-      <div className="w-72 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col">
+      <div className={`${mobileTab === 'convs' ? 'flex' : 'hidden'} md:flex w-full md:w-72 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col min-h-0`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <span className="font-medium text-sm text-gray-700 dark:text-gray-300">会话列表</span>
           {activeAccountId && (
@@ -1156,7 +1300,7 @@ export function ChatNew() {
       </div>
 
       {/* 右侧：聊天记录 */}
-      <div className="flex-1 min-w-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col">
+      <div className={`${mobileTab === 'chat' ? 'flex' : 'hidden'} md:flex flex-1 min-w-0 min-h-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col`}>
         {/* 聊天头部 */}
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -1269,7 +1413,7 @@ export function ChatNew() {
         </div>
         {/* 底部输入框 */}
         {activeCid && (
-          <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center gap-2">
+          <div className="p-3 border-t border-gray-200 dark:border-gray-700">
             <input
               ref={imageInputRef}
               type="file"
@@ -1277,47 +1421,76 @@ export function ChatNew() {
               className="hidden"
               onChange={handleImageSelected}
             />
-            <button
-              type="button"
-              onClick={handlePickImage}
-              disabled={sending}
-              title="发送图片"
-              className="flex-shrink-0 flex items-center justify-center w-9 h-9 text-gray-500 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <ImagePlus className="w-4 h-4" />
-            </button>
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  handleSendMessage()
-                }
-              }}
-              placeholder="输入消息..."
-              disabled={sending}
-              className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <button
-              onClick={handleSendMessage}
-              disabled={sending || !inputText.trim()}
-              className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-white bg-blue-500 rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {sending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Send className="w-4 h-4" />
-              )}
-              发送
-            </button>
+            {pendingImage && (
+              <div className="mb-2 inline-flex items-start gap-2 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50 p-2">
+                <img
+                  src={pendingImage.previewUrl}
+                  className="h-20 w-20 rounded object-contain bg-white dark:bg-gray-800 cursor-pointer"
+                  alt="待发送图片"
+                  onClick={() => setPreviewImage(pendingImage.previewUrl)}
+                />
+                <div className="min-w-0 max-w-44">
+                  <div className="truncate text-xs text-gray-600 dark:text-gray-300">{pendingImage.file.name}</div>
+                  <div className="mt-1 text-xs text-gray-400">点击发送按钮后发送图片</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearPendingImage}
+                  disabled={sending}
+                  title="移除待发送图片"
+                  className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={handlePickImage}
+                disabled={sending}
+                title="发送图片"
+                className="flex-shrink-0 flex items-center justify-center w-9 h-9 text-gray-500 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <ImagePlus className="w-4 h-4" />
+              </button>
+              <textarea
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onPaste={handlePasteImage}
+                onKeyDown={(e) => {
+                  // Enter 发送；Shift+Enter / Ctrl+Enter 在输入框内换行
+                  // 中文输入法选词阶段的回车（compositionend 前）不触发发送
+                  const isComposing = e.nativeEvent.isComposing || (e as any).keyCode === 229
+                  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !isComposing) {
+                    e.preventDefault()
+                    handleSendMessage()
+                  }
+                }}
+                placeholder="输入消息...（Shift+Enter 换行，Enter 发送）"
+                disabled={sending}
+                rows={1}
+                className="flex-1 px-3 py-2 text-sm leading-5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 resize-none max-h-32 overflow-y-auto whitespace-pre-wrap"
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={sending || (!inputText.trim() && !pendingImage)}
+                className="flex-shrink-0 flex items-center gap-1 px-4 h-9 text-sm font-medium text-white bg-blue-500 rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {sending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                发送
+              </button>
+            </div>
           </div>
         )}
       </div>
       {/* 图片预览弹窗 */}
       {/* 右侧工作区：客户订单 + 快捷短语 */}
-      <div className="w-80 flex-shrink-0 flex flex-col gap-3">
+      <div className={`${mobileTab === 'tools' ? 'flex' : 'hidden'} md:flex w-full md:w-80 flex-shrink-0 min-h-0 flex-col gap-3 overflow-y-auto md:overflow-visible`}>
         <CustomerOrdersPanel
           activeCid={activeCid}
           orders={customerOrders}
@@ -1348,6 +1521,7 @@ export function ChatNew() {
           onContentChange={setPhraseContent}
           onSave={handleSavePhrase}
         />
+      </div>
       </div>
       <OrderDetailModal
         order={orderDetail}

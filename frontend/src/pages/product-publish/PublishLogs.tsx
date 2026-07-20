@@ -7,7 +7,7 @@
  * 3. 显示发布结果
  * 4. 成功的记录可直接跳转查看商品
  */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { ScrollText, RefreshCw, ExternalLink, ChevronLeft, ChevronRight, Loader2, Trash2 } from 'lucide-react'
 import { useUIStore } from '@/store/uiStore'
@@ -27,6 +27,7 @@ const ADDRESS_SOURCE_CONFIG: Record<string, { label: string; cls: string }> = {
   material: { label: '素材地址', cls: 'badge-primary' },
   account_pool: { label: '账号随机', cls: 'badge-warning' },
   global_pool: { label: '全局随机', cls: 'badge-gray' },
+  personal_pool: { label: '个人随机', cls: 'badge-primary' },
 }
 
 export function PublishLogs() {
@@ -43,7 +44,6 @@ export function PublishLogs() {
   const [accounts, setAccounts] = useState<any[]>([])
   const [filterAccount, setFilterAccount] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
-  const isFirstFilterRender = useRef(true)
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const [clearing, setClearing] = useState(false)
 
@@ -72,11 +72,19 @@ export function PublishLogs() {
 
   useEffect(() => { load(page, pageSize) }, [page, pageSize])
 
-  useEffect(() => {
-    if (isFirstFilterRender.current) { isFirstFilterRender.current = false; return }
+  // 点击「查询」：用当前筛选值从第一页加载
+  const handleSearch = () => {
     if (page === 1) load(1, pageSize)
     else setPage(1)
-  }, [filterAccount, filterStatus])
+  }
+
+  // 点击「重置」：清空筛选条件并重新加载
+  const handleReset = () => {
+    setFilterAccount('')
+    setFilterStatus('')
+    if (page === 1) load(1, pageSize, '', '')
+    else setPage(1)
+  }
 
   const handlePageSizeChange = (size: number) => { setPageSize(size); setPage(1) }
 
@@ -119,7 +127,7 @@ export function PublishLogs() {
           <button
             onClick={() => setShowClearConfirm(true)}
             className="btn-ios-danger"
-            title="清空30天前的日志"
+            title="清空10天前的日志"
             disabled={tableLoading || clearing}
           >
             <Trash2 className="w-4 h-4" />
@@ -134,7 +142,7 @@ export function PublishLogs() {
       {/* 筛选栏 */}
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="vben-card">
         <div className="vben-card-body">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="flex flex-wrap items-end gap-4">
             <div className="input-group">
               <label className="input-label">筛选账号</label>
               <select className="input-ios" value={filterAccount}
@@ -154,6 +162,16 @@ export function PublishLogs() {
                   <option key={k} value={k}>{v.label}</option>
                 ))}
               </select>
+            </div>
+            <div className="flex items-end gap-2 ml-auto">
+              <button className="btn-ios-primary" onClick={handleSearch} disabled={tableLoading}>
+                查询
+              </button>
+              {(filterAccount || filterStatus) && (
+                <button className="btn-ios-secondary text-red-500" onClick={handleReset} disabled={tableLoading}>
+                  重置
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -289,7 +307,7 @@ export function PublishLogs() {
           <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-md w-full p-6">
             <h3 className="text-lg font-semibold mb-4">确认清空日志</h3>
             <p className="text-slate-600 dark:text-slate-400 mb-6">
-              此操作将清空30天前的发布日志数据，最近30天的日志将被保留。确定要继续吗？
+              此操作将清空10天前的发布日志数据，最近10天的日志将被保留。确定要继续吗？
             </p>
             <div className="flex justify-end gap-3">
               <button

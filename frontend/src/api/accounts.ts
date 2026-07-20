@@ -42,6 +42,7 @@ export interface AccountFilterParams {
   online?: boolean | null                // 在线状态（true=在线/false=离线）
   disable_reason?: string | null         // 禁用原因关键词（模糊搜索）
   account_id?: string | null             // 账号ID关键词（模糊搜索）
+  owner_username?: string | null         // 所属用户名关键词（模糊搜索，管理员用）
 }
 
 // 获取账号详情列表（分页）
@@ -115,6 +116,10 @@ export const getAccountDetailsPaginated = async (
     // 账号ID：模糊搜索关键词，去除前后空白后再判断是否传参，避免发送空字符串
     if (filters.account_id && filters.account_id.trim()) {
       params.append('account_id', filters.account_id.trim())
+    }
+    // 所属用户名：模糊搜索关键词，去除前后空白后再判断是否传参，避免发送空字符串
+    if (filters.owner_username && filters.owner_username.trim()) {
+      params.append('owner_username', filters.owner_username.trim())
     }
   }
   
@@ -364,6 +369,8 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
   success: boolean
   status: 'pending' | 'scanned' | 'success' | 'failed' | 'expired' | 'cancelled' | 'verification_required' | 'processing' | 'already_processed' | 'error'
   message?: string
+  face_qr_url?: string
+  verification_url?: string
   account_info?: {
     account_id: string
     is_new_account: boolean
@@ -375,6 +382,8 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
     data?: {
       status: string
       message?: string
+      face_qr_url?: string
+      verification_url?: string
       account_info?: { account_id: string; is_new_account: boolean }
     }
   }>(`${QR_LOGIN_PREFIX}/status/${sessionId}`)
@@ -384,6 +393,8 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
     success: result.success,
     status: status as 'pending' | 'scanned' | 'success' | 'failed' | 'expired' | 'cancelled' | 'verification_required' | 'processing' | 'already_processed' | 'error',
     message: result.message || result.data?.message,
+    face_qr_url: result.data?.face_qr_url,
+    verification_url: result.data?.verification_url,
     account_info: result.data?.account_info,
   }
 }
@@ -398,6 +409,8 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
   cookie_count?: number
   verification_url?: string
   screenshot_path?: string
+  // 协议登录：触发人脸时的人脸二维码（base64 data-url）
+  face_qr_url?: string
   error?: string
 }> => {
   const result = await get<{
@@ -408,6 +421,7 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
     cookie_count?: number
     verification_url?: string
     screenshot_path?: string
+    face_qr_url?: string
     error?: string
   }>(`${PASSWORD_LOGIN_PREFIX}/check/${sessionId}`)
   return {
@@ -419,8 +433,14 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
     cookie_count: result.cookie_count,
     verification_url: result.verification_url,
     screenshot_path: result.screenshot_path,
+    face_qr_url: result.face_qr_url,
     error: result.error,
   }
+}
+
+// 取消密码登录会话
+export const cancelPasswordLogin = (sessionId: string): Promise<{ success: boolean; message?: string }> => {
+  return del(`${PASSWORD_LOGIN_PREFIX}/cancel/${sessionId}`)
 }
 
 // AI 服务商类型
@@ -545,6 +565,32 @@ export const updateProxyConfig = (accountId: string, config: ProxyConfig): Promi
 // 清除代理配置
 export const clearProxyConfig = (accountId: string): Promise<ProxyConfigResponse> => {
   return del(`${PROXY_PREFIX}/${accountId}`)
+}
+
+// ==================== 退款订单注销配置 ====================
+
+const REFUND_CANCEL_PREFIX = '/api/v1/refund-cancel'
+
+export interface RefundCancelConfig {
+  enabled: boolean      // 是否开启退款订单注销
+  url?: string | null   // 注销接口请求URL
+  timeout?: number      // 请求超时时间(秒)
+}
+
+export interface RefundCancelConfigResponse {
+  success: boolean
+  message?: string
+  data?: RefundCancelConfig
+}
+
+// 获取退款订单注销配置
+export const getRefundCancelConfig = (accountId: string): Promise<RefundCancelConfigResponse> => {
+  return get(`${REFUND_CANCEL_PREFIX}/${accountId}`)
+}
+
+// 更新退款订单注销配置
+export const updateRefundCancelConfig = (accountId: string, config: RefundCancelConfig): Promise<RefundCancelConfigResponse> => {
+  return put(`${REFUND_CANCEL_PREFIX}/${accountId}`, config)
 }
 
 // ==================== 人脸验证相关 ====================

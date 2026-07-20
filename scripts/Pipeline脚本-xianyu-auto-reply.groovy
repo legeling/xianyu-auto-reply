@@ -19,23 +19,8 @@
         BACKEND_WEB_IMAGE_NAME = 'xianyu-backend-web'
         SCHEDULER_IMAGE_NAME = 'xianyu-scheduler'
 
-        // 基础设施镜像 - 从国内加速源同步多架构镜像到阿里云（amd64 + arm64）
-        // 镜像名与 docker-compose.yml 保持一致（xianyu- 前缀）
-        // 源镜像用 docker.io 官方路径，配合下方多镜像前缀回退（imagetools 不走 buildkitd mirror）
-        MYSQL_IMAGE_REF = 'library/mysql:8.0'
-        MYSQL_TARGET_TAG = 'xianyu-mysql:8.0'
-        REDIS_IMAGE_REF = 'library/redis:7-alpine'
-        REDIS_TARGET_TAG = 'xianyu-redis:7-alpine'
-        // Docker Hub 国内加速前缀（多镜像回退，参照 jenkins/优化Buildx网络.sh）
-        DOCKERHUB_MIRRORS = 'docker.1ms.run docker.xuanyuan.me dockerpull.com'
-
         // 支持的平台
         PLATFORMS = 'linux/amd64,linux/arm64'
-
-        // 构建资源限制（作用于 buildx 的 buildkit 容器）—— 已按 2核/2G 服务器调小
-        BUILD_MEMORY = '6536m'       // buildkit 容器内存上限（总内存 2G，留 ~0.5G 给系统/守护进程）
-        BUILD_CPU_QUOTA = '550000'   // CPU 配额(微秒/100ms)：100000=1核，150000=1.5核，留点给系统
-        BUILD_PARALLELISM = '2'      // 低内存下串行构建，避免并发步骤叠加内存导致 OOM
     }
     
     stages {
@@ -88,12 +73,9 @@
                         # 检查 buildx 是否可用
                         docker buildx version
 
-                        # buildkitd 配置：限制并发构建步骤 + docker.io 镜像加速（多镜像回退，参照 jenkins/优化Buildx网络.sh）
+                        # buildkitd 配置：docker.io 镜像加速（多镜像回退，参照 jenkins/优化Buildx网络.sh）
                         BUILDKIT_CFG="$(pwd)/buildkitd.toml"
                         cat > "${BUILDKIT_CFG}" <<EOF
-[worker.oci]
-  max-parallelism = ${BUILD_PARALLELISM}
-
 [registry."docker.io"]
   mirrors = ["docker.1ms.run", "docker.xuanyuan.me", "dockerpull.com"]
 EOF
@@ -104,16 +86,13 @@ EOF
                             CFG_FLAG="--buildkitd-config"
                         fi
 
-                        # 重建带资源限制的 builder
-                        # docker-container driver 支持 memory / cpu-quota 等资源限制，作用于整个构建容器
+                        # 重建 builder（不限制内存/CPU/并发，充分利用机器资源）
                         docker buildx rm multiarch-builder 2>/dev/null || true
                         docker buildx create --name multiarch-builder --driver docker-container --use \
-                            --driver-opt memory=${BUILD_MEMORY} \
-                            --driver-opt cpu-quota=${BUILD_CPU_QUOTA} \
                             ${CFG_FLAG} "${BUILDKIT_CFG}"
                         docker buildx inspect --bootstrap
 
-                        echo "资源限制: 内存=${BUILD_MEMORY} CPU配额=${BUILD_CPU_QUOTA}(100000=1核) 并发=${BUILD_PARALLELISM}"
+                        echo "资源限制: 无（内存/CPU/并发不限制）"
                         echo "支持的平台:"
                         docker buildx inspect | grep Platforms
                     '''
@@ -141,7 +120,6 @@ EOF
                                 docker buildx build \\
                                     --platform ${PLATFORMS} \\
                                     -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${FRONTEND_IMAGE_NAME}:latest \\
-                                    -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${FRONTEND_IMAGE_NAME}:build-${BUILD_NUMBER} \\
                                     -f docker/frontend/Dockerfile \\
                                     --push \\
                                     .
@@ -174,7 +152,6 @@ EOF
                                 docker buildx build \\
                                     --platform ${PLATFORMS} \\
                                     -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${WEBSOCKET_IMAGE_NAME}:latest \\
-                                    -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${WEBSOCKET_IMAGE_NAME}:build-${BUILD_NUMBER} \\
                                     -f websocket/Dockerfile \\
                                     --push \\
                                     .
@@ -207,7 +184,6 @@ EOF
                                 docker buildx build \\
                                     --platform ${PLATFORMS} \\
                                     -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${BACKEND_WEB_IMAGE_NAME}:latest \\
-                                    -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${BACKEND_WEB_IMAGE_NAME}:build-${BUILD_NUMBER} \\
                                     -f backend-web/Dockerfile \\
                                     --push \\
                                     .
@@ -240,7 +216,6 @@ EOF
                                 docker buildx build \\
                                     --platform ${PLATFORMS} \\
                                     -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${SCHEDULER_IMAGE_NAME}:latest \\
-                                    -t ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${SCHEDULER_IMAGE_NAME}:build-${BUILD_NUMBER} \\
                                     -f scheduler/Dockerfile \\
                                     --push \\
                                     .
@@ -255,60 +230,6 @@ EOF
             }
         }
 
-        stage('同步MySQL/Redis多架构镜像到阿里云') {
-            steps {
-                echo "开始同步基础设施镜像（MySQL/Redis）多架构镜像到阿里云..."
-                echo "目标平台: ${PLATFORMS}"
-                // 官方 mysql:8.0 / redis:7-alpine 本身即多架构镜像；
-                // 使用 buildx imagetools create 直接复制整个 manifest list（含 amd64 + arm64），无需 pull/rebuild
-                retry(5) {
-                    script {
-                        withCredentials([usernamePassword(
-                            credentialsId: "${ALIYUN_CREDENTIALS}",
-                            usernameVariable: 'REGISTRY_USER',
-                            passwordVariable: 'REGISTRY_PASS'
-                        )]) {
-                            sh """
-                                # 登录阿里云镜像仓库
-                                echo "\${REGISTRY_PASS}" | docker login ${ALIYUN_REGISTRY} -u "\${REGISTRY_USER}" --password-stdin
-
-                                # imagetools 不经过 buildkitd 的镜像加速，这里对源镜像做多镜像前缀回退
-                                copy_image() {
-                                    SRC_REF="\$1"   # 例如 library/mysql:8.0
-                                    DST="\$2"        # 目标镜像全名
-                                    for M in ${DOCKERHUB_MIRRORS}; do
-                                        echo "尝试从 \${M}/\${SRC_REF} 复制到 \${DST}"
-                                        if docker buildx imagetools create -t "\${DST}" "\${M}/\${SRC_REF}"; then
-                                            echo "✓ 复制成功（源镜像: \${M}）"
-                                            return 0
-                                        fi
-                                        echo "✗ \${M} 失败，尝试下一个加速源..."
-                                    done
-                                    echo "所有加速源均失败: \${SRC_REF}"
-                                    return 1
-                                }
-
-                                # 复制 MySQL / Redis 多架构镜像（保留 amd64 + arm64）
-                                copy_image "${MYSQL_IMAGE_REF}" "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${MYSQL_TARGET_TAG}"
-                                copy_image "${REDIS_IMAGE_REF}" "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${REDIS_TARGET_TAG}"
-
-                                # 校验目标镜像架构
-                                echo "MySQL 镜像架构:"
-                                docker buildx imagetools inspect ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${MYSQL_TARGET_TAG} | grep -E 'Platform|MediaType' || true
-                                echo "Redis 镜像架构:"
-                                docker buildx imagetools inspect ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${REDIS_TARGET_TAG} | grep -E 'Platform|MediaType' || true
-
-                                # 登出
-                                docker logout ${ALIYUN_REGISTRY}
-                            """
-                        }
-                    }
-                }
-                echo '✓ MySQL/Redis 多架构镜像同步完成！'
-            }
-        }
-
-        
         stage('清理 Builder 缓存') {
             steps {
                 echo '清理 buildx 缓存...'
@@ -334,23 +255,15 @@ EOF
             ────────────────────────────────────────
             前端镜像:
               ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${FRONTEND_IMAGE_NAME}:latest
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${FRONTEND_IMAGE_NAME}:build-${BUILD_NUMBER}
               
             WebSocket镜像:
               ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${WEBSOCKET_IMAGE_NAME}:latest
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${WEBSOCKET_IMAGE_NAME}:build-${BUILD_NUMBER}
             
             Backend-Web镜像:
               ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${BACKEND_WEB_IMAGE_NAME}:latest
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${BACKEND_WEB_IMAGE_NAME}:build-${BUILD_NUMBER}
             
             Scheduler镜像:
               ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${SCHEDULER_IMAGE_NAME}:latest
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${SCHEDULER_IMAGE_NAME}:build-${BUILD_NUMBER}
-
-            基础设施镜像（多架构，已同步到阿里云）:
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${MYSQL_TARGET_TAG}
-              ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${REDIS_TARGET_TAG}
             
             支持的架构：
               linux/amd64  (x86_64 - Intel/AMD 处理器)

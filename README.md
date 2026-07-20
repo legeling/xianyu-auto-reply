@@ -125,6 +125,7 @@ xianyu-auto-reply/
 ├── docker/frontend/      # 前端 Dockerfile 与 Nginx 配置
 ├── docker-compose.yml    # 本地源码构建编排
 ├── deploy.sh             # 一键部署脚本（自动生成远程镜像版 compose）
+├── deploy_remote.sh      # 远程 MySQL/Redis 一键部署脚本（自动生成 docker-compose.remote.yml）
 ├── update.sh             # 一键更新脚本（拉取最新远程镜像）
 ├── build.sh              # 本地源码全量构建脚本
 ├── build_frontend.sh     # 单独构建并重启 Frontend
@@ -199,7 +200,32 @@ bash deploy.sh
 bash update.sh
 ```
 
-### 方式三：本地源码 Docker 构建
+### 方式三：使用远程 MySQL / Redis 部署
+
+当 MySQL 和 Redis 由外部（如云数据库 RDS、独立服务器或已有实例）提供时，可使用 `deploy_remote.sh`。
+该脚本**不内置 mysql/redis 容器**，仅拉取并启动 4 个应用服务（frontend / backend-web / websocket / scheduler），
+数据库连接信息通过 `.env.remote` 配置。与方式一相同，直接远程拉取脚本执行即可：
+
+```bash
+# 1) 首次运行：自动生成 .env.remote 后退出，提示填写远程连接信息
+curl -fsSL https://xy-update.zhinianboke.com/deploy_remote.sh | sed 's/\r$//' | bash
+
+# 2) 编辑 .env.remote，填写真实的远程地址（勿填 localhost）
+#    MYSQL_HOST / REDIS_HOST 等
+vim .env.remote
+
+# 3) 再次运行：校验配置 → 自动生成 docker-compose.remote.yml → 拉取镜像 → 启动
+curl -fsSL https://xy-update.zhinianboke.com/deploy_remote.sh | sed 's/\r$//' | bash
+```
+
+> 已克隆仓库的也可改用本地脚本：`bash deploy_remote.sh`（首次生成配置后退出，填好 `.env.remote` 再次执行）。
+
+- 首次运行自动生成 `.env.remote`，每次运行自动生成 `docker-compose.remote.yml`，均不影响根目录原有的 `.env` / `docker-compose.yml` / `docker-compose.deploy.yml`
+- 容器名与主套保持一致（`xianyu-backend-web` / `xianyu-websocket` / `xianyu-scheduler` / `xianyu-frontend`），与方式二/方式四属于同一套部署，二者只需选其一，不要同时启动
+- 远程 MySQL 需提前创建好数据库（默认 `xianyu_data`）并授权部署机 IP 远程访问，应用启动时会自动建表与补齐字段
+- 若远程库/缓存就在宿主机上，请使用 `host.docker.internal` 或宿主机内网 IP，**不要填 `localhost` / `127.0.0.1`**
+
+### 方式四：本地源码 Docker 构建
 
 ```bash
 bash build.sh rebuild
@@ -225,7 +251,7 @@ bash build_websocket.sh     # 重建 WebSocket
 bash build_scheduler.sh     # 重建 Scheduler
 ```
 
-### 方式四：源码本地开发
+### 方式五：源码本地开发
 
 #### 1. 准备基础服务
 
@@ -271,6 +297,7 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 pip install -e .
 python -m playwright install chromium
+python -m patchright install chromium
 python main.py
 ```
 
@@ -282,6 +309,7 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 pip install -e .
 python -m playwright install chromium
+python -m patchright install chromium
 python main.py
 ```
 
@@ -553,6 +581,7 @@ npm run dev
 | 脚本 | 平台 | 作用 |
 |------|------|------|
 | `deploy.sh` | Linux | 生成远程镜像版 compose 并拉取镜像启动（首次部署） |
+| `deploy_remote.sh` | Linux | 使用远程 MySQL/Redis 部署，生成 `docker-compose.remote.yml` 与 `.env.remote` 并启动应用服务 |
 | `update.sh` | Linux | 拉取最新远程镜像并重建应用容器（后续更新） |
 | `build.sh` | Linux | 从源码全量构建所有 Docker 镜像并启动 |
 | `build_frontend.sh` | Linux | 单独重建并重启 Frontend 服务 |
@@ -588,7 +617,9 @@ npm run dev
 
 ### 登录或发布时报浏览器缺失？
 
-在对应 Python 环境执行：`python -m playwright install chromium`。Docker 环境依赖各服务 Dockerfile 内已安装的浏览器。
+Backend-Web 和 WebSocket 需要在对应 Python 环境依次执行：
+`python -m playwright install chromium`、`python -m patchright install chromium`。
+Docker 环境依赖各服务 Dockerfile 内已安装的浏览器。
 
 ### Docker 部署端口冲突？
 

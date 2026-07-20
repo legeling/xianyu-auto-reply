@@ -79,6 +79,38 @@ class BackendWebConfig(BaseConfig):
         alias="CARD_DOCK_BASE_URL",
     )
 
+    # 外部 API 密钥管理服务：用于个人设置「对接卡密秘钥」一键创建密钥
+    # 复用 CARD_DOCK_BASE_URL 作为基址，仅 key 通过环境变量单独配置（禁止写死）
+    external_api_key: str = Field(
+        default="",
+        alias="EXTERNAL_API_KEY",
+    )
+
+    # 远程官方服务基址：仪表盘广告、系统公告等内容支持「本地 + 远程官方」合并展示（与桌面版同源）
+    # 默认指向官方服务器，可通过环境变量 REMOTE_OFFICIAL_BASE_URL 覆盖（禁止写死 localhost）
+    remote_official_base_url: str = Field(
+        default="https://xy.zhinianboke.com",
+        alias="REMOTE_OFFICIAL_BASE_URL",
+    )
+
+    # 是否启用远程官方广告合并展示（官方服务器自身部署时可设为 False，避免重复展示自己的广告）
+    enable_remote_ads: bool = Field(
+        default=True,
+        alias="ENABLE_REMOTE_ADS",
+    )
+
+    # 是否启用远程官方公告合并展示（官方服务器自身部署时可设为 False，避免重复展示自己的公告）
+    enable_remote_announcements: bool = Field(
+        default=True,
+        alias="ENABLE_REMOTE_ANNOUNCEMENTS",
+    )
+
+    # 是否启用远程官方弹窗公告合并展示（官方服务器自身部署时可设为 False，避免重复展示自己的弹窗公告）
+    enable_remote_popup_announcements: bool = Field(
+        default=True,
+        alias="ENABLE_REMOTE_POPUP_ANNOUNCEMENTS",
+    )
+
     @computed_field(return_type=list[str])
     @property
     def cors_origins(self) -> List[str]:
