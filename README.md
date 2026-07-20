@@ -104,6 +104,10 @@
 - 最低 2 核 CPU / 4GB 内存
 - 推荐 4 核 CPU / 8GB 内存
 
+## 分支管理
+
+本仓库的上游为 [zhinianboke/xianyu-auto-reply](https://github.com/zhinianboke/xianyu-auto-reply)。分支模型（`main` 稳定基线 / `dev` 日常开发 / `feature/*` 短期功能）与上游同步流程见 [BRANCHING.md](BRANCHING.md)。
+
 ## 项目结构
 
 ```text
@@ -300,7 +304,200 @@ npm install
 npm run dev
 ```
 
-#### 5. 启动返佣子系统
+#### 5. 使用命令行客户端
+
+项目提供一个正式 CLI 包，直接调用 `backend-web` 已有 API，适合不想在页面里反复点击的批量查看和基础操作。
+
+CLI 目录结构：
+
+```text
+xianyu_cli/
+├── client.py            # HTTP 客户端与认证头处理
+├── config.py            # 本地配置与 token 存储
+├── output.py            # 表格/JSON 输出
+├── openapi.py           # OpenAPI 路由发现、功能分组与 operationId 调用
+├── frontend.py          # 前端 API 调用静态扫描与覆盖审计
+├── websocket_client.py  # 在线聊天实时推送 WebSocket 监听
+├── request_args.py      # JSON、表单、文件上传和下载参数解析
+├── webmap.py            # 前端路由/页面到后端功能模块的映射
+├── main.py              # xianyu-cli 入口
+└── commands/            # 按功能拆分的命令模块
+    ├── accounts.py      # 账号快捷命令
+    ├── auth.py          # 登录、token 和当前用户
+    ├── items.py         # 商品快捷查询
+    ├── orders.py        # 订单快捷查询
+    ├── settings.py      # 系统设置快捷命令
+    ├── web.py           # 按网页版页面浏览、覆盖检查和调用 API
+    ├── features.py      # 按后端功能模块浏览和调用 API
+    └── routes.py        # 按原始 OpenAPI operationId 调用 API
+```
+
+```bash
+# 在项目根目录执行
+python scripts/xianyu_cli.py config set-url http://127.0.0.1:8089
+
+# 检查后端地址、健康检查、OpenAPI 和 token 是否可用
+python scripts/xianyu_cli.py doctor
+
+# 也可以离线读取本地 OpenAPI JSON 做接口审计
+python scripts/xianyu_cli.py --openapi-file ./openapi.json web coverage
+
+# 登录后会把 token 保存到 ~/.xianyu-auto-reply-cli.json
+python scripts/xianyu_cli.py auth login -u admin
+
+# 查看当前登录用户
+python scripts/xianyu_cli.py auth whoami
+
+# 常用查询
+python scripts/xianyu_cli.py health
+python scripts/xianyu_cli.py accounts list --page-size 50
+python scripts/xianyu_cli.py items list --account-id <账号ID>
+python scripts/xianyu_cli.py orders --search <订单号或商品ID>
+python scripts/xianyu_cli.py keywords --account-id <账号ID>
+
+# 常用操作
+python scripts/xianyu_cli.py accounts disable <账号ID>
+python scripts/xianyu_cli.py accounts enable <账号ID>
+python scripts/xianyu_cli.py accounts remark <账号ID> "备用账号"
+
+# Cookie 较长时建议从 stdin 输入
+pbpaste | python scripts/xianyu_cli.py accounts cookie <账号ID>
+
+# 兜底：直接调用任意 backend-web API
+python scripts/xianyu_cli.py api GET /api/v1/system-settings
+python scripts/xianyu_cli.py api PUT /api/v1/system-settings/registration_enabled -d '{"value":"false"}'
+
+# 文件上传、导入和导出也走同一套调用能力
+python scripts/xianyu_cli.py api POST /api/v1/upload/upload-image -F image=./card.png
+python scripts/xianyu_cli.py api POST /api/v1/cookies/import -F file=./accounts.xlsx -f enable_all=true
+python scripts/xianyu_cli.py api POST /api/v1/cookies/export -d '{}' -o ./accounts_export.xlsx
+```
+
+`features` 和 `routes` 命令会读取后端 `/openapi.json`。`features` 按网页版功能模块分组，适合日常使用；`routes` 保留原始 OpenAPI 视角，适合精确排查。
+
+`web ops`、`features ops` 和 `routes list` 输出里的 `inputs` 字段用于提示调用参数：
+`path:name*` 对应 `-p name=...`，`query:name` 对应 `-q name=...`，`body:json*` 对应 `-d '{...}'`，`body:multipart*` 对应 `-f key=value` / `-F file=...`；`*` 表示 OpenAPI 标记为必填。
+
+如果不想手写参数，可以先生成完整调用模板。默认只生成必填参数；加 `--include-optional` 会把 OpenAPI 里的可选字段也放进模板：
+
+```bash
+python scripts/xianyu_cli.py web examples accounts --search import
+python scripts/xianyu_cli.py features examples cookies --search status
+python scripts/xianyu_cli.py routes template list_cookie_details_paginated_api_v1_cookies_details_paginated_get
+```
+
+`web` 命令按前端页面组织接口，更接近网页版菜单：
+
+```bash
+# 列出网页版页面与对应 API 功能模块
+python scripts/xianyu_cli.py web pages
+
+# 检查网页版页面是否都有后端 OpenAPI 映射
+python scripts/xianyu_cli.py web coverage
+python scripts/xianyu_cli.py web coverage --only missing
+python scripts/xianyu_cli.py web coverage --unmapped-features
+python scripts/xianyu_cli.py --openapi-file ./openapi.json web coverage --only missing
+
+# 审计前端源码实际调用的 API 是否都存在于 OpenAPI，并且都能映射到页面 feature
+python scripts/xianyu_cli.py web audit
+python scripts/xianyu_cli.py web audit --only missing_openapi
+python scripts/xianyu_cli.py web audit --only unmapped_feature
+python scripts/xianyu_cli.py --openapi-file ./openapi.json web audit --frontend-root frontend/src
+
+# 按 frontend/src/api 里的导出函数查 CLI 调用模板，更贴近网页版源码
+python scripts/xianyu_cli.py web functions --search getAccountDetails
+python scripts/xianyu_cli.py web functions --search accounts --include-optional
+python scripts/xianyu_cli.py --openapi-file ./openapi.json web functions --frontend-root frontend/src
+# 精确查看某个前端函数；组合式函数会展开成多条后端接口模板
+python scripts/xianyu_cli.py web function addKeyword
+# 一对一函数可直接用 web function-call
+
+# 聚合门禁：同时检查页面映射、后端 feature 映射、前端源码 API；默认有问题就返回非 0
+python scripts/xianyu_cli.py web verify
+python scripts/xianyu_cli.py web verify accounts
+python scripts/xianyu_cli.py web verify --skip-frontend
+python scripts/xianyu_cli.py web verify --allow-failures
+
+# 运行只读 smoke 测试：只会自动挑选无必填参数的 GET JSON 接口；默认有失败就返回非 0
+python scripts/xianyu_cli.py web smoke --dry-run
+python scripts/xianyu_cli.py web smoke accounts --dry-run
+python scripts/xianyu_cli.py web smoke accounts --limit 10 --fail-fast
+python scripts/xianyu_cli.py web smoke accounts --allow-failures
+python scripts/xianyu_cli.py web smoke login --no-auth --limit 5
+
+# 查看某个页面能调用哪些 API，页面可用 key、路径或中文标题
+python scripts/xianyu_cli.py web ops accounts
+python scripts/xianyu_cli.py web ops /accounts
+python scripts/xianyu_cli.py web ops 账号管理
+
+# 生成页面下某些操作的可复制 CLI 调用模板
+python scripts/xianyu_cli.py web examples accounts --search import
+
+# 按页面调用接口，操作名来自 web ops 的 feature.operation，也可用页面内唯一操作名或 operationId
+python scripts/xianyu_cli.py web call accounts cookies.get-details-paginated -q page=1 -q page_size=50
+python scripts/xianyu_cli.py web call 账号管理 cookies.get-details-paginated -q page=1 -q page_size=50
+
+# 也可以直接按前端 API 函数名调用；重名时用 module.function
+python scripts/xianyu_cli.py web function-call accounts.getAccountDetails
+python scripts/xianyu_cli.py web function-call getAccountDetails
+
+# 监听在线聊天实时推送。WebSocket 不在 OpenAPI 里，CLI 单独提供 web ws
+python scripts/xianyu_cli.py web ws <账号ID>
+python scripts/xianyu_cli.py web ws <账号ID> --limit 10 --timeout 60
+
+# 页面维度调用同样支持文件上传/下载
+python scripts/xianyu_cli.py web call accounts cookies.post-import -F file=./accounts.xlsx -f enable_all=true
+python scripts/xianyu_cli.py web call accounts cookies.post-export -d '{}' -o ./accounts_export.xlsx
+```
+
+```bash
+# 按功能模块列出接口，例如 cookies、items、orders、chat-new、product-publish
+python scripts/xianyu_cli.py features list
+
+# 查看某个功能模块有哪些操作
+python scripts/xianyu_cli.py features ops cookies
+
+# 生成模块下某些操作的可复制 CLI 调用模板
+python scripts/xianyu_cli.py features examples cookies --search export
+
+# 按功能模块调用，操作名来自 features ops
+python scripts/xianyu_cli.py features call cookies get-details-paginated -q page=1 -q page_size=50
+python scripts/xianyu_cli.py features call cookies put-account-id-status -p account_id=<账号ID> -d '{"enabled":false}'
+```
+
+`routes` 可发现和调用网页版使用的全部后端接口：
+
+```bash
+# 列出全部接口
+python scripts/xianyu_cli.py routes list
+
+# 搜索账号相关接口
+python scripts/xianyu_cli.py routes list --search cookies
+
+# 查看某个 operationId 的完整定义
+python scripts/xianyu_cli.py routes show list_cookie_details_paginated_api_v1_cookies_details_paginated_get
+
+# 生成单个 operationId 的可复制 CLI 调用模板
+python scripts/xianyu_cli.py routes template list_cookie_details_paginated_api_v1_cookies_details_paginated_get
+
+# 按 operationId 调用接口，-p 传路径参数，-q 传查询参数，-d 传 JSON 请求体
+python scripts/xianyu_cli.py routes call list_cookie_details_paginated_api_v1_cookies_details_paginated_get -q page=1 -q page_size=50
+```
+
+安装为可执行命令后也可以直接使用：
+
+```bash
+pip install -e .
+xianyu-cli accounts list
+```
+
+如果后端开启了登录滑动验证码，CLI 的用户名密码登录会被后端拦截。可先在页面完成登录后复制 access token，再写入 CLI：
+
+```bash
+python scripts/xianyu_cli.py auth token set <access-token>
+```
+
+#### 6. 启动返佣子系统
 
 ```bash
 # 返佣后端
