@@ -20,7 +20,6 @@ from common.models.notification_channel import NotificationChannel
 from common.models.message_notification import MessageNotification
 from common.models.feedback import Feedback, FeedbackType
 from common.models.feedback_message import FeedbackMessage
-from common.models.advertisement import Advertisement, AdType, AdStatus
 from common.models.goofish_crawl_job import GoofishCrawlJob
 from common.models.goofish_crawl_item import GoofishCrawlItem
 from common.models.cookie_refresh_schedule import CookieRefreshSchedule
@@ -77,9 +76,6 @@ __all__ = [
     "Feedback",
     "FeedbackType",
     "FeedbackMessage",
-    "Advertisement",
-    "AdType",
-    "AdStatus",
     "GoofishCrawlJob",
     "GoofishCrawlItem",
     "CookieRefreshSchedule",

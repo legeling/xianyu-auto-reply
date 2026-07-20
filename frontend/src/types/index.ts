@@ -209,10 +209,6 @@ export interface LoginBrandingSettings {
   'login.system_description': string
 }
 
-export interface AuthFooterAdSettings {
-  'auth.footer_ad_html': string
-}
-
 export type ThemeEffect = 'solid' | 'gradient'
 export type ThemeColorPreset = 'ocean' | 'emerald' | 'violet' | 'indigo' | 'amber' | 'sunset' | 'aurora' | 'rose' | 'ruby'
 export type ThemeFontFamily = 'system' | 'yahei' | 'heiti' | 'songti' | 'kaiti' | 'fangsong' | 'xingkai' | 'rounded' | 'monospace'
@@ -246,7 +242,6 @@ export interface SystemSettings {
   'login.system_name'?: string
   'login.system_title'?: string
   'login.system_description'?: string
-  'auth.footer_ad_html'?: string
   'theme.effect'?: ThemeEffect
   'theme.color_preset'?: ThemeColorPreset
   'theme.font_family'?: ThemeFontFamily

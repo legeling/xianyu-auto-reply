@@ -12,7 +12,6 @@ from fastapi import APIRouter
 from . import (
     activation,
     admin,
-    advertisements,
     ai,
     announcements,
     auto_reply_logs,
@@ -122,7 +121,6 @@ api_router.include_router(auto_rate.router, prefix="/auto-rate", tags=["自动�
 api_router.include_router(system_settings.router, prefix="/system-settings", tags=["系统设置"])
 api_router.include_router(announcements.router, prefix="/announcements", tags=["公告管理"])
 api_router.include_router(feedback.router, prefix="/feedbacks", tags=["反馈管理"])
-api_router.include_router(advertisements.router, prefix="/advertisements", tags=["广告管理"])
 api_router.include_router(auto_reply_logs.router, tags=["消息日志"])
 api_router.include_router(account_login_logs.router, tags=["账号登录日志"])
 api_router.include_router(db_backup_logs.router, tags=["数据库备份日志"])

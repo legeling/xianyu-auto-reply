@@ -1,7 +1,6 @@
 import { get, post, put } from '@/utils/request'
 import type {
   ApiResponse,
-  AuthFooterAdSettings,
   DisclaimerSettings,
   LoginBrandingSettings,
   SystemSettings,
@@ -22,6 +21,7 @@ const ADMIN_PREFIX = '/api/v1/admin'
 const USERS_PREFIX = '/api/v1/users'
 const MENU_HIDDEN_SETTING_KEY = 'navigation.hidden_menu_keys'
 const READONLY_SYSTEM_SETTING_KEYS = ['runtime.is_exe_mode']
+const REMOVED_SYSTEM_SETTING_KEYS = ['auth.footer_ad_html', 'ad_price.carousel', 'ad_price.text']
 const DEFAULT_DISCLAIMER_SETTINGS: DisclaimerSettings = {
   'disclaimer.title': '免责声明',
   'disclaimer.content': '数据存储说明\n1. 本系统在运行过程中，为保障服务正常运行，会存储用户账号密码、登录 Cookie、商品信息、卡券信息等业务数据。\n2. 上述数据仅用于系统功能运行、自动化处理和业务管理，不作为其他用途。\n3. 请您自行确认服务器环境、账号权限和数据保管措施的安全性。\n\n用户须知\n1. 用户应确保使用本系统的行为符合相关平台规则和法律法规。\n2. 因用户自身违规操作、账号共享、密码泄露、服务器安全问题导致的损失，由用户自行承担。\n3. 建议用户定期备份重要数据，因系统故障、第三方平台变更、不可抗力等导致的异常或损失，本系统不承担责任。\n4. 本系统依赖第三方平台接口和网络环境，无法保证服务始终连续、稳定、无中断。\n\n隐私与风险提示\n1. 请勿在未充分评估风险的情况下接入生产环境或敏感账号。\n2. 使用本系统即表示您已充分理解并接受相关风险，并愿意自行承担相应责任。',
@@ -34,10 +34,6 @@ const DEFAULT_LOGIN_BRANDING_SETTINGS: LoginBrandingSettings = {
   'login.system_name': '闲鱼管理系统',
   'login.system_title': '高效专业的\n闲鱼自动化管理平台',
   'login.system_description': '自动回复、智能客服、订单管理、数据分析，一站式解决闲鱼运营难题',
-}
-
-const DEFAULT_AUTH_FOOTER_AD_SETTINGS: AuthFooterAdSettings = {
-  'auth.footer_ad_html': '© 2026 划算云服务器 ·<a href="http://www.hsykj.com" target="_BLANK">www.hsykj.com</a>',
 }
 
 const DISCLAIMER_SETTING_KEYS: Array<keyof DisclaimerSettings> = [
@@ -54,10 +50,6 @@ const LOGIN_BRANDING_SETTING_KEYS: Array<keyof LoginBrandingSettings> = [
   'login.system_description',
 ]
 
-const AUTH_FOOTER_AD_SETTING_KEYS: Array<keyof AuthFooterAdSettings> = [
-  'auth.footer_ad_html',
-]
-
 const BOOLEAN_SYSTEM_SETTING_KEYS = ['registration_enabled', 'show_default_login_info', 'login_captcha_enabled', 'smtp_use_tls', 'smtp_use_ssl', 'runtime.is_exe_mode', 'account.face_verify_timeout_disable', 'proxy.enabled']
 
 export const LOGIN_BRANDING_UPDATED_EVENT = 'login-branding-updated'
@@ -65,6 +57,9 @@ export const LOGIN_BRANDING_UPDATED_EVENT = 'login-branding-updated'
 const convertSystemSettings = (data: Record<string, unknown>): SystemSettings => {
   const converted: SystemSettings = {}
   for (const [key, value] of Object.entries(data)) {
+    if (REMOVED_SYSTEM_SETTING_KEYS.includes(key)) {
+      continue
+    }
     if (BOOLEAN_SYSTEM_SETTING_KEYS.includes(key)) {
       converted[key] = value === true || value === 'true'
     } else {
@@ -89,7 +84,7 @@ export const getPublicSystemSettings = async (): Promise<{ success: boolean; dat
 export const updateSystemSettings = async (data: Partial<SystemSettings>): Promise<ApiResponse> => {
   // 逐个更新设置项，确保 value 是字符串
   const promises = Object.entries(data)
-    .filter(([key]) => !READONLY_SYSTEM_SETTING_KEYS.includes(key))
+    .filter(([key]) => !READONLY_SYSTEM_SETTING_KEYS.includes(key) && !REMOVED_SYSTEM_SETTING_KEYS.includes(key))
     .map(([key, value]) => {
     // 将布尔值和数字转换为字符串
     let stringValue: string
@@ -167,30 +162,6 @@ export const updateLoginBrandingSettings = async (settings?: Partial<SystemSetti
     dispatchLoginBrandingUpdated(settings)
   }
   return response
-}
-
-export const getDefaultAuthFooterAdSettings = (): AuthFooterAdSettings => ({ ...DEFAULT_AUTH_FOOTER_AD_SETTINGS })
-
-export const normalizeAuthFooterAdSettings = (settings?: Partial<SystemSettings> | null): AuthFooterAdSettings => {
-  const footerAdHtml = settings?.['auth.footer_ad_html']
-
-  return {
-    'auth.footer_ad_html': typeof footerAdHtml === 'string' && footerAdHtml.trim()
-      ? footerAdHtml
-      : DEFAULT_AUTH_FOOTER_AD_SETTINGS['auth.footer_ad_html'],
-  }
-}
-
-export const buildAuthFooterAdSettingsPayload = (settings?: Partial<SystemSettings> | null): AuthFooterAdSettings => {
-  const normalized = normalizeAuthFooterAdSettings(settings)
-  return AUTH_FOOTER_AD_SETTING_KEYS.reduce((payload, key) => {
-    payload[key] = normalized[key]
-    return payload
-  }, {} as AuthFooterAdSettings)
-}
-
-export const updateAuthFooterAdSettings = async (settings?: Partial<SystemSettings> | null): Promise<ApiResponse> => {
-  return updateSystemSettings(buildAuthFooterAdSettingsPayload(settings) as Partial<SystemSettings>)
 }
 
 export const buildThemeAppearanceSettingsPayload = (settings?: Partial<SystemSettings> | null): ThemeAppearanceSettings => {
@@ -385,19 +356,6 @@ export const uploadDatabaseBackup = async (file: File): Promise<ApiResponse> => 
   const formData = new FormData()
   formData.append('backup_file', file)
   return post(`${ADMIN_PREFIX}/backup/upload`, formData)
-}
-
-// 导出用户备份
-export const exportUserBackup = (): string => {
-  const token = localStorage.getItem('auth_token')
-  return `/api/v1/backup/export?token=${token}`
-}
-
-// 导入用户备份
-export const importUserBackup = async (file: File): Promise<ApiResponse> => {
-  const formData = new FormData()
-  formData.append('file', file)
-  return post('/api/v1/backup/import', formData)
 }
 
 // ========== 用户设置 ==========

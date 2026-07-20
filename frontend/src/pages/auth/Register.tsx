@@ -2,9 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { MessageSquare, User, Lock, Mail, KeyRound, Eye, EyeOff } from 'lucide-react'
 import { AuthNavbar } from '@/components/common/AuthNavbar'
-import { SafeHtml } from '@/components/common/SafeHtml'
-import { getDefaultAuthFooterAdSettings } from '@/api/settings'
-import { register, getRegistrationStatus, generateCaptcha, verifyCaptcha, sendVerificationCode, getAuthFooterAdSettings } from '@/api/auth'
+import { register, getRegistrationStatus, generateCaptcha, verifyCaptcha, sendVerificationCode } from '@/api/auth'
 import { useUIStore } from '@/store/uiStore'
 import { cn } from '@/utils/cn'
 import { ButtonLoading } from '@/components/common/Loading'
@@ -16,7 +14,6 @@ export function Register() {
   const [loading, setLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [registrationEnabled, setRegistrationEnabled] = useState(true)
-  const [authFooterAd, setAuthFooterAd] = useState(() => getDefaultAuthFooterAdSettings())
 
   // Form states
   const [username, setUsername] = useState('')
@@ -45,9 +42,6 @@ export function Register() {
       })
       .catch(() => {})
 
-    getAuthFooterAdSettings()
-      .then((result) => setAuthFooterAd(result))
-      .catch(() => {})
   }, [navigate, addToast])
 
   useEffect(() => {
@@ -371,11 +365,6 @@ export function Register() {
           </p>
         </div>
 
-        {/* Footer */}
-        <SafeHtml
-          html={authFooterAd['auth.footer_ad_html']}
-          className="mt-6 text-center text-xs text-slate-400 dark:text-slate-500"
-        />
       </div>
       </div>
     </div>

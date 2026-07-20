@@ -1,6 +1,6 @@
 import { post, get } from '@/utils/request'
-import { normalizeAuthFooterAdSettings, normalizeLoginBrandingSettings } from '@/api/settings'
-import type { AuthFooterAdSettings, LoginBrandingSettings, LoginRequest, LoginResponse, ApiResponse } from '@/types'
+import { normalizeLoginBrandingSettings } from '@/api/settings'
+import type { LoginBrandingSettings, LoginRequest, LoginResponse, ApiResponse } from '@/types'
 
 const AUTH_PREFIX = '/api/v1/auth'
 const SYSTEM_PREFIX = '/api/v1/system-settings'
@@ -82,11 +82,6 @@ export const getLoginCaptchaStatus = async (): Promise<{ enabled: boolean }> => 
 export const getLoginBrandingSettings = async (): Promise<LoginBrandingSettings> => {
   const settings = await getPublicSettings()
   return normalizeLoginBrandingSettings(settings)
-}
-
-export const getAuthFooterAdSettings = async (): Promise<AuthFooterAdSettings> => {
-  const settings = await getPublicSettings()
-  return normalizeAuthFooterAdSettings(settings)
 }
 
 // 生成图形验证码

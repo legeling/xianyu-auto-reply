@@ -3,9 +3,8 @@ import { useNavigate, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { MessageSquare, Mail, KeyRound, Lock, Eye, EyeOff, ArrowLeft } from 'lucide-react'
 import { AuthNavbar } from '@/components/common/AuthNavbar'
-import { SafeHtml } from '@/components/common/SafeHtml'
-import { getDefaultAuthFooterAdSettings, getDefaultLoginBrandingSettings } from '@/api/settings'
-import { sendResetPasswordCode, resetPassword, getLoginBrandingSettings, getAuthFooterAdSettings } from '@/api/auth'
+import { getDefaultLoginBrandingSettings } from '@/api/settings'
+import { sendResetPasswordCode, resetPassword, getLoginBrandingSettings } from '@/api/auth'
 import { useUIStore } from '@/store/uiStore'
 import { ButtonLoading } from '@/components/common/Loading'
 
@@ -17,7 +16,6 @@ export function ForgotPassword() {
   const [loading, setLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [loginBranding, setLoginBranding] = useState(() => getDefaultLoginBrandingSettings())
-  const [authFooterAd, setAuthFooterAd] = useState(() => getDefaultAuthFooterAdSettings())
 
   // Form states
   const [email, setEmail] = useState('')
@@ -32,9 +30,6 @@ export function ForgotPassword() {
   useEffect(() => {
     getLoginBrandingSettings()
       .then((result) => setLoginBranding(result))
-      .catch(() => {})
-    getAuthFooterAdSettings()
-      .then((result) => setAuthFooterAd(result))
       .catch(() => {})
   }, [])
 
@@ -319,11 +314,6 @@ export function ForgotPassword() {
               </p>
             </div>
 
-            {/* Footer */}
-            <SafeHtml
-              html={authFooterAd['auth.footer_ad_html']}
-              className="mt-6 text-center text-xs text-slate-400 dark:text-slate-500"
-            />
           </motion.div>
         </div>
       </div>

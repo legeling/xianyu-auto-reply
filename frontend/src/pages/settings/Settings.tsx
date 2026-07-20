@@ -1,14 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Navigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Mail, RefreshCw, Eye, EyeOff, Copy, Upload, MessageCircle, Users, Percent, CreditCard, Megaphone, Heart, Globe } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Mail, RefreshCw, Eye, EyeOff, Copy, Upload, MessageCircle, Users, Percent, CreditCard, Heart, Globe } from 'lucide-react'
 import {
   buildHiddenMenuSettingsPayload,
   getHiddenMenuKeysFromSettings,
   getSystemSettings,
-  normalizeAuthFooterAdSettings,
   normalizeDisclaimerSettings,
   normalizeLoginBrandingSettings,
-  updateAuthFooterAdSettings,
   updateSystemSettings,
   updateDisclaimerSettings,
   updateLoginBrandingSettings,
@@ -28,14 +26,12 @@ import { copyToClipboard } from '@/utils/clipboard'
 import { getExeForcedHiddenMenuKeys } from '@/config/navigation'
 import { applyThemeSettings, normalizeThemeAppearanceSettings, normalizeThemeFontSettings } from '@/utils/theme'
 import { DisclaimerSettingsCard } from './DisclaimerSettingsCard'
-import { AuthFooterAdSettingsCard } from './AuthFooterAdSettingsCard'
 import { LoginBrandingSettingsCard } from './LoginBrandingSettingsCard'
 import { MenuVisibilitySettings } from './MenuVisibilitySettings'
 import { ThemeAppearanceSettingsCard } from './ThemeAppearanceSettingsCard'
 import { ThemeFontSettingsCard } from './ThemeFontSettingsCard'
 import { useMenuVisibilityStore } from '@/store/menuVisibilityStore'
 import type {
-  AuthFooterAdSettings,
   DisclaimerSettings,
   LoginBrandingSettings,
   SystemSettings,
@@ -53,7 +49,6 @@ export function Settings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [loginBrandingSaving, setLoginBrandingSaving] = useState(false)
-  const [authFooterAdSaving, setAuthFooterAdSaving] = useState(false)
   const [disclaimerSaving, setDisclaimerSaving] = useState(false)
   const [hiddenMenuSaving, setHiddenMenuSaving] = useState(false)
   const [themeAppearanceSaving, setThemeAppearanceSaving] = useState(false)
@@ -92,7 +87,6 @@ export function Settings() {
   const [testEmail, setTestEmail] = useState('')
   const [sendingTestEmail, setSendingTestEmail] = useState(false)
   const loginBrandingSettings = normalizeLoginBrandingSettings(settings)
-  const authFooterAdSettings = normalizeAuthFooterAdSettings(settings)
   const disclaimerSettings = normalizeDisclaimerSettings(settings)
   const themeAppearanceSettings = normalizeThemeAppearanceSettings(settings)
   const themeFontSettings = normalizeThemeFontSettings(settings)
@@ -190,33 +184,6 @@ export function Settings() {
       addToast({ type: 'error', message: getApiErrorMessage(error, '登录品牌设置保存失败') })
     } finally {
       setLoginBrandingSaving(false)
-    }
-  }
-
-  const handleAuthFooterAdChange = (key: keyof AuthFooterAdSettings, value: string) => {
-    setSettings((current) => ({
-      ...(current ?? {}),
-      [key]: value,
-    }))
-  }
-
-  const handleAuthFooterAdSave = async () => {
-    if (!settings) {
-      return
-    }
-
-    try {
-      setAuthFooterAdSaving(true)
-      const result = await updateAuthFooterAdSettings(settings)
-      if (result.success) {
-        addToast({ type: 'success', message: result.message || '底部广告设置保存成功' })
-      } else {
-        addToast({ type: 'error', message: result.message || '底部广告设置保存失败' })
-      }
-    } catch (error) {
-      addToast({ type: 'error', message: getApiErrorMessage(error, '底部广告设置保存失败') })
-    } finally {
-      setAuthFooterAdSaving(false)
     }
   }
 
@@ -934,15 +901,6 @@ export function Settings() {
       )}
 
       {user?.is_admin && (
-        <AuthFooterAdSettingsCard
-          settings={authFooterAdSettings}
-          saving={authFooterAdSaving}
-          onChange={handleAuthFooterAdChange}
-          onSave={handleAuthFooterAdSave}
-        />
-      )}
-
-      {user?.is_admin && (
         <DisclaimerSettingsCard
           settings={disclaimerSettings}
           saving={disclaimerSaving}
@@ -1086,53 +1044,6 @@ export function Settings() {
                   className="input-ios"
                 />
                 <p className="text-xs text-slate-400 mt-1">用户每次提现金额不得低于此値，不填则不限制。</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 广告费用管理（仅管理员可见） */}
-      {user?.is_admin && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="vben-card">
-            <div className="vben-card-header">
-              <h2 className="vben-card-title">
-                <Megaphone className="w-4 h-4" />
-                广告费用管理
-              </h2>
-            </div>
-            <div className="vben-card-body space-y-4">
-              <p className="text-sm text-slate-500 dark:text-slate-400">按广告类型设置每月费用，用户申请广告时会根据此价格计算总费用</p>
-              <div className="input-group">
-                <label className="input-label">轮播图广告（元/月）</label>
-                <input
-                  type="text"
-                  value={(settings?.['ad_price.carousel'] as string) || ''}
-                  onChange={(e) => {
-                    const val = e.target.value
-                    if (val === '' || /^\d*\.?\d{0,2}$/.test(val)) {
-                      setSettings(s => s ? { ...s, 'ad_price.carousel': val } : null)
-                    }
-                  }}
-                  placeholder="请输入轮播图广告每月价格"
-                  className="input-ios"
-                />
-              </div>
-              <div className="input-group">
-                <label className="input-label">文字广告（元/月）</label>
-                <input
-                  type="text"
-                  value={(settings?.['ad_price.text'] as string) || ''}
-                  onChange={(e) => {
-                    const val = e.target.value
-                    if (val === '' || /^\d*\.?\d{0,2}$/.test(val)) {
-                      setSettings(s => s ? { ...s, 'ad_price.text': val } : null)
-                    }
-                  }}
-                  placeholder="请输入文字广告每月价格"
-                  className="input-ios"
-                />
               </div>
             </div>
           </div>

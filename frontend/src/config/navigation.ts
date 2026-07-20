@@ -148,14 +148,12 @@ export const adminNavItems: NavEntry[] = [
   },
   { key: 'admin-scheduled-tasks', icon: Timer, label: '定时任务', path: '/admin/scheduled-tasks', adminOnly: true },
   { key: 'admin-announcements', icon: Megaphone, label: '公告管理', path: '/admin/announcements', adminOnly: true },
-  { key: 'admin-ad-manage', icon: Image, label: '广告管理', path: '/admin/ad-manage', adminOnly: true },
   { key: 'admin-fund-flows', icon: Wallet, label: '资金流水', path: '/admin/fund-flows', adminOnly: true },
 ]
 
 export const bottomNavItems: NavItem[] = [
   { key: 'tutorial', icon: BookOpen, label: '使用教程', path: '/tutorial' },
   { key: 'feedback', icon: MessageSquarePlus, label: '意见反馈', path: '/feedback' },
-  { key: 'ad-apply', icon: Image, label: '广告申请', path: '/ad-apply' },
   { key: 'disclaimer', icon: AlertTriangle, label: '免责声明', path: '/disclaimer' },
   { key: 'about', icon: Info, label: '关于', path: '/about' },
 ]
