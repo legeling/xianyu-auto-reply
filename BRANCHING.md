@@ -65,6 +65,25 @@ git push origin dev
 
 原则：**冲突只在 `dev` 上解决**，`main` 永远保持"上游 + 已验证定制"的可发布状态。
 
+### 2.1 本地定制保护清单（同步上游时不可丢失）
+
+以下是本 fork 相对上游的主动定制。每次合并上游冲突时，**默认保留我方版本**，确认无误后才允许改动：
+
+| 定制项 | 范围 | 冲突处理规则 |
+|--------|------|--------------|
+| 移除广告模块 | `backend-web/app/api/routes/advertisements.py`、`common/models/advertisement.py`、`frontend/src/api/advertisements.ts`、`frontend/src/pages/advertisements/**`、Dashboard 广告位、导航"广告"菜单、底部"广告申请"入口、系统设置中的 `ad_price.*` / `auth.footer_ad_html` | 上游对这些文件的修改**一律不采纳**（modify/delete 冲突选删除）；上游新增的广告相关代码块（菜单项、路由、组件、设置卡片）不并入。`REMOVED_SYSTEM_SETTING_KEYS` 过滤逻辑必须保留 |
+| xianyu-cli 命令行工具 | `xianyu_cli/`、`tests/`、`scripts/xianyu_cli.py`、根级 `pyproject.toml` | 上游若新增同名文件需人工核对，不直接覆盖 |
+| 分支与工程规范 | `BRANCHING.md`、`.gitignore` 中本地新增条目（如 `trajectory_history/`） | `.gitignore` 冲突时**两侧条目都保留** |
+| 启动器精简 | `launcher/gui_dashboard.py` | 上游改动可合入，但需人工确认不引入已移除的广告相关入口 |
+
+通用原则：
+
+1. **我方删除的，不同步回来**：凡本清单中"移除"类定制，上游对应的新增/修改在冲突时一律以我方删除为准。
+2. **上游新增的独立功能，正常吸收**：与定制无关的新功能（如弹窗公告、用户到期设置）照常合入；若与已移除模块有挂载关系（如弹窗公告原挂在"广告"菜单下），将其改挂到独立位置而非随菜单一并删除。
+3. **同一处的双方修改，取并集**：如设置项过滤列表、`.gitignore`，双方各自新增的条目都保留。
+4. **合并后必须验证**：前端 `cd frontend && npx tsc --noEmit` 通过、后端 `python -m compileall backend-web/app common` 通过、无残留引用（`grep -rn "advertisement" frontend/src backend-web/app common` 无意外命中）后才提交合并。
+5. **新定制要登记**：今后再移除或重写上游功能时，同步把保护规则追加到上表。
+
 ### 3. 发布 / 上线
 
 `dev` 验证稳定后：
