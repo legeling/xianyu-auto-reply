@@ -27,6 +27,7 @@ from common.models.xy_account import XYAccount
 from common.models.xy_keyword_rule import XYKeywordRule
 from common.models.xy_order import XYOrder
 from common.services.account_limit_service import AccountLimitService
+from common.utils.internal_auth import build_internal_headers
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +309,8 @@ class DashboardStatsService:
         try:
             settings = get_settings()
             url = f"{settings.websocket_service_url.rstrip('/')}/internal/accounts/connection-stats"
-            response = await get_http_client().get(url)
+            # 内部接口鉴权头（X-Internal-Token 共享密钥）
+            response = await get_http_client().get(url, headers=build_internal_headers(settings))
             if isinstance(response, dict) and response.get("success"):
                 count = int((response.get("data") or {}).get("connected", 0) or 0)
                 self.__class__._online_cookies_cache = (now, count)
@@ -333,7 +335,11 @@ class DashboardStatsService:
             settings = get_settings()
             url = f"{settings.websocket_service_url.rstrip('/')}/internal/accounts/connection-stats"
             # 加 3 秒超时上限：websocket 慢/不可达时也不会拖慢账号列表（最多等 3 秒即按离线处理）
-            response = await asyncio.wait_for(get_http_client().get(url), timeout=3.0)
+            # 内部接口鉴权头（X-Internal-Token 共享密钥）
+            response = await asyncio.wait_for(
+                get_http_client().get(url, headers=build_internal_headers(settings)),
+                timeout=3.0,
+            )
             if isinstance(response, dict) and response.get("success"):
                 raw_ids = (response.get("data") or {}).get("connected_account_ids") or []
                 ids = frozenset(str(x) for x in raw_ids)

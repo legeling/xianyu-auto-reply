@@ -1,4 +1,4 @@
-﻿"""
+"""
 系统设置服务
 
 功能：
@@ -17,7 +17,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from common.models.system_setting import SystemSetting
 from common.utils.text_utils import escape_xss
 
-SENSITIVE_KEYS = {"admin_password_hash"}
+# 安全（M2 修复）：敏感设置分级管理
+#
+# 1) PROTECTED_KEYS —— 完全保护键：GET 一律不返回，PUT 一律拒绝，
+#    只能由专用流程管理（JWT 密钥由 jwt_secret_service 数据库托管自动生成；
+#    管理员密码哈希由专用改密接口管理）。
+PROTECTED_KEYS = {
+    "security.jwt_secret_key",
+    "admin_password_hash",
+}
+
+# 2) SENSITIVE_KEYS —— 敏感密钥类键：GET 脱敏返回 "***"（存在且非空时），
+#    防止管理员设置页/接口响应泄露私钥与口令；PUT 时若原样提交 "***" 则忽略不更新，
+#    提交新值则允许管理员正常修改（保持设置页可用）。
+#    完整名单来源：通读代码确认的密钥类设置键（私钥/口令/共享密钥）。
+SENSITIVE_KEYS = {
+    # 支付宝应用私钥（当面付签名）；app_private_key 为同义历史键名，一并防护
+    "alipay.private_key",
+    "alipay.app_private_key",
+    # SMTP 邮箱口令（DB 键为 smtp_ 前缀，见 email_service.get_smtp_settings）
+    "smtp_password",
+    # 远程过滑块共享密钥（外部服务凭它调用本机过滑块接口）
+    "captcha.remote_secret_key",
+}
+
+# GET 脱敏占位符：前端设置页会将该占位符原样提交回来，PUT 端识别后忽略不更新
+SENSITIVE_MASK = "***"
+
+# 兼容旧代码引用：历史上 SENSITIVE_KEYS 同时承担"禁止通过通用接口修改"的语义
+_LEGACY_PROTECTED_KEYS = PROTECTED_KEYS
 
 DEFAULT_DISCLAIMER_CONTENT = (
     "数据存储说明\n"
@@ -158,7 +186,12 @@ class SystemSettingService:
         result = await self.session.execute(stmt)
         settings: Dict[str, str] = {}
         for entry in result.scalars().all():
+            # 完全保护键：任何情况下都不出现在通用设置读取结果中
+            if entry.key in PROTECTED_KEYS:
+                continue
+            # 敏感密钥类键：未显式要求时脱敏返回 "***"，避免泄露私钥/口令
             if not include_sensitive and entry.key in SENSITIVE_KEYS:
+                settings[entry.key] = SENSITIVE_MASK if entry.value else ""
                 continue
             settings[entry.key] = entry.value
         password_login_mode = str(settings.get("password_login.mode") or "").strip().lower()
@@ -174,6 +207,13 @@ class SystemSettingService:
         return settings
 
     async def set_setting(self, key: str, value: str, description: str | None = None) -> None:
+        # 安全：完全保护键禁止通过通用设置接口写入（只能走专用管理流程）
+        if key in PROTECTED_KEYS:
+            raise ValueError(f"设置项 {key} 受保护，不能通过通用接口修改")
+        # 安全：前端会将脱敏占位符 "***" 原样提交回来，此时忽略不更新（保留原值）
+        if key in SENSITIVE_KEYS and value == SENSITIVE_MASK:
+            return
+
         stmt = select(SystemSetting).where(SystemSetting.key == key)
         result = await self.session.execute(stmt)
         record = result.scalars().first()
@@ -201,6 +241,19 @@ class SystemSettingService:
         Returns:
             无返回值；全部设置成功后统一提交。
         """
+        if not settings:
+            return
+
+        # 安全：完全保护键禁止通过通用设置接口写入
+        protected = [key for key in settings if key in PROTECTED_KEYS]
+        if protected:
+            raise ValueError(f"设置项 {protected[0]} 受保护，不能通过通用接口修改")
+        # 安全：脱敏占位符 "***" 原样提交回来时忽略不更新（保留原值）
+        settings = {
+            key: value_tuple
+            for key, value_tuple in settings.items()
+            if not (key in SENSITIVE_KEYS and value_tuple[0] == SENSITIVE_MASK)
+        }
         if not settings:
             return
 

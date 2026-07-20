@@ -43,7 +43,12 @@ async def _authenticate_ws_user(token: str | None) -> User | None:
     if not token:
         return None
     try:
-        payload = TokenPayload(**decode_token(token))
+        raw_payload = decode_token(token)
+        # 安全：与 get_current_user 一致的令牌类型校验（拒绝 refresh token 混淆使用；
+        # 无 type 字段的旧令牌按 access 兼容处理）
+        if raw_payload.get("type", "access") != "access":
+            return None
+        payload = TokenPayload(**raw_payload)
         if payload.sub is None:
             return None
         user_id = int(payload.sub)
@@ -77,11 +82,44 @@ async def _user_can_access_account(user: User, account_id: str) -> bool:
     return account is not None and account.owner_id == user.id
 
 
+# 通过 Sec-WebSocket-Protocol 传递令牌的子协议标记：
+# 前端 new WebSocket(url, ["bearer", "<token>"])，服务端选回 "bearer" 完成协商。
+WS_TOKEN_SUBPROTOCOL = "bearer"
+
+
+def _extract_ws_token(websocket: WebSocket, query_token: str | None) -> tuple[str | None, str | None]:
+    """从 WebSocket 握手提取登录令牌。
+
+    安全：查询参数中的 token 会进入访问日志/浏览器历史，属于敏感信息泄露面。
+    按优先级支持三种传递方式：
+    1. Authorization: Bearer <token> 请求头（非浏览器客户端可用）；
+    2. Sec-WebSocket-Protocol 子协议（浏览器推荐新用法）：
+       new WebSocket(url, ["bearer", "<token>"])；
+    3. 查询参数 token（旧用法，保留兼容，已标记废弃，前端应尽快迁移到方式 2）。
+
+    Returns:
+        (token, 需要协商回应的子协议或 None)
+    """
+    auth_header = websocket.headers.get("authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip(), None
+
+    protocols = websocket.headers.get("sec-websocket-protocol")
+    if protocols:
+        parts = [p.strip() for p in protocols.split(",") if p.strip()]
+        if len(parts) >= 2 and parts[0].lower() == WS_TOKEN_SUBPROTOCOL:
+            # JWT 字符集（base64url + '.'）均为合法的 subprotocol token 字符
+            return parts[1], WS_TOKEN_SUBPROTOCOL
+
+    # 废弃兼容：查询参数 token
+    return query_token, None
+
+
 @router.websocket("/ws/{account_id}")
 async def chat_new_websocket(
     websocket: WebSocket,
     account_id: str,
-    token: str | None = Query(default=None, description="登录令牌"),
+    token: str | None = Query(default=None, description="登录令牌（已废弃，请改用 Sec-WebSocket-Protocol 或 Authorization 头）"),
 ):
     """
     在线聊天(新) WebSocket 连接
@@ -89,9 +127,11 @@ async def chat_new_websocket(
     前端连接后，会自动将此 WebSocket 注册到 ImSessionManager，
     当 IM 推送消息到达时，会实时转发给前端。
 
-    鉴权说明：
-    - 连接需通过查询参数 `token` 携带登录令牌（浏览器 WebSocket 无法设置请求头）。
-    - token 无效返回关闭码 4401；无权访问该账号返回关闭码 4403。
+    鉴权说明（按优先级）：
+    - Authorization: Bearer <token> 请求头（非浏览器客户端）；
+    - Sec-WebSocket-Protocol：new WebSocket(url, ["bearer", "<token>"])（浏览器推荐）；
+    - 查询参数 `token`（旧用法，保留兼容、已废弃：token 会进入访问日志）。
+    token 无效返回关闭码 4401；无权访问该账号返回关闭码 4403。
 
     推送消息格式示例：
     {
@@ -114,14 +154,18 @@ async def chat_new_websocket(
     Args:
         websocket: WebSocket 连接
         account_id: 账号ID
-        token: 登录令牌（查询参数）
+        token: 登录令牌（查询参数，已废弃的兼容方式）
     """
+    # 从握手信息提取令牌（Header > Sec-WebSocket-Protocol > 查询参数）
+    ws_token, negotiated_subprotocol = _extract_ws_token(websocket, token)
+
     # 鉴权：先 accept 再校验，确保自定义关闭码（4401/4403）能通过 WebSocket 关闭帧
     # 可靠送达浏览器（若在 accept 前 close，握手会被以 HTTP 拒绝，客户端只会收到 1006）。
     # 校验未通过时立即关闭，全程不注册到消息管理器、不下发任何数据，无信息泄露。
-    await websocket.accept()
+    # 若客户端通过子协议传 token，accept 时需选回该子协议完成协商。
+    await websocket.accept(subprotocol=negotiated_subprotocol)
 
-    user = await _authenticate_ws_user(token)
+    user = await _authenticate_ws_user(ws_token)
     if user is None:
         logger.warning(f"【{account_id}】在线聊天 WebSocket 鉴权失败：token 无效或缺失，拒绝连接")
         await websocket.close(code=WS_CLOSE_UNAUTHORIZED)

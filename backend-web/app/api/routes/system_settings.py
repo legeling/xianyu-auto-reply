@@ -19,9 +19,15 @@ from app.core.http_client import get_http_client
 from common.models.user import User, UserRole
 from common.schemas.common import ApiResponse
 from common.schemas.system_setting import SystemSettingUpdate
-from app.services.system_setting_service import SENSITIVE_KEYS, SystemSettingService
+from app.services.system_setting_service import (
+    PROTECTED_KEYS,
+    SENSITIVE_KEYS,
+    SENSITIVE_MASK,
+    SystemSettingService,
+)
 from common.utils.logging_utils import update_log_retention
 from common.utils.browser_utils import is_frozen
+from common.utils.internal_auth import build_internal_headers
 
 router = APIRouter(tags=["system_settings"])
 
@@ -119,9 +125,11 @@ async def _notify_log_retention_service(
         }
 
     try:
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
         response = await get_http_client().post(
             f"{service_url.rstrip('/')}/internal/logs/retention",
             json={"retention_days": retention_days},
+            headers=build_internal_headers(get_settings()),
         )
         success = bool(response.get("success"))
         default_msg = f"{service_name}服务刷新成功" if success else f"{service_name}服务刷新失败"
@@ -203,8 +211,13 @@ async def update_system_setting(
     current_user: User = Depends(deps.get_current_admin_user),
     service: SystemSettingService = Depends(deps.get_system_setting_service),
 ) -> ApiResponse:
-    if key in SENSITIVE_KEYS:
+    # 安全（M2 修复）：完全保护键（JWT 密钥、管理员密码哈希）禁止通过通用接口修改
+    if key in PROTECTED_KEYS:
         return ApiResponse(success=False, message="该设置需要使用专用接口修改")
+    # 安全：敏感密钥类键原样提交脱敏占位符 "***" 时视为未变更（保留原值），
+    # 防止前端设置页把掩码当成新值覆盖掉真实密钥
+    if key in SENSITIVE_KEYS and payload.value == SENSITIVE_MASK:
+        return ApiResponse(success=True, message="系统设置未变更")
 
     setting_value = payload.value
     if key == PASSWORD_LOGIN_MODE_KEY:

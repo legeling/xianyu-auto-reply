@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import ssl
 from typing import Any
 
 import aiohttp
@@ -39,7 +38,8 @@ async def _fetch_remote_json(path: str) -> dict[str, Any] | None:
     """
     从远程官方服务器以 GET 方式拉取 JSON 数据
 
-    远程站点证书可能不被信任，跳过校验（与桌面版仪表盘行为一致）。
+    安全（M6 修复）：恢复默认 TLS 证书校验——此前跳过证书校验会使远程内容
+    可被中间人篡改（广告/公告内容会被直接展示给所有用户）。
     任何网络/解析异常都静默降级，返回 None。
 
     Args:
@@ -55,15 +55,12 @@ async def _fetch_remote_json(path: str) -> dict[str, Any] | None:
 
     url = f"{base_url}{path}"
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
     try:
         timeout = aiohttp.ClientTimeout(total=_REMOTE_TIMEOUT)
         headers = {"User-Agent": REMOTE_USER_AGENT}
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=headers, ssl=ssl_ctx) as resp:
+            # 不传 ssl 参数即使用默认证书校验
+            async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     logger.warning(f"远程接口 {path} 返回非 200 状态: {resp.status}")
                     return None

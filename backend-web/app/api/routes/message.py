@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+import hmac
+
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from loguru import logger
 
@@ -31,17 +33,23 @@ class SendMessageResponse(BaseModel):
 # ==================== 工具函数 ====================
 
 # API秘钥（从配置读取）
-def get_api_secret_key() -> str:
-    """获取API密钥"""
+def get_api_secret_key() -> str | None:
+    """获取API密钥（仅来自配置/环境变量 API_SECRET_KEY）。
+
+    安全（H3 修复）：不再回退到源码内置的硬编码默认密钥；
+    未配置时返回 None，由调用方 fail-closed 拒绝服务（503）。
+    """
     from app.core.config import get_settings
     settings = get_settings()
-    # 优先从环境变量读取，否则使用默认值
-    return getattr(settings, 'api_secret_key', 'xianyu_api_secret_2024')
+    return (settings.api_secret_key or "").strip() or None
 
 
 def verify_api_key(api_key: str) -> bool:
-    """验证API秘钥"""
-    return api_key == get_api_secret_key()
+    """验证API秘钥（hmac.compare_digest 常量时间比较，防时序侧信道）"""
+    expected = get_api_secret_key()
+    if not expected:
+        return False
+    return hmac.compare_digest(api_key, expected)
 
 
 def clean_param(param_str: str) -> str:
@@ -75,10 +83,19 @@ async def send_message(request: SendMessageRequest):
                 success=False,
                 message="API秘钥不能为空"
             )
-        
+
+        # 安全（H3 修复）：服务端未配置 API_SECRET_KEY 时 fail-closed，
+        # 返回 503 而非使用任何默认密钥
+        if get_api_secret_key() is None:
+            logger.error("消息发送接口被拒绝：服务端未配置 API_SECRET_KEY（fail-closed）")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="消息接口未配置，请联系管理员配置 API_SECRET_KEY",
+            )
+
         # 验证秘钥
         if not verify_api_key(cleaned_api_key):
-            logger.warning(f"API秘钥验证失败: {cleaned_api_key}")
+            logger.warning("API秘钥验证失败")  # 安全：日志不再记录传入的密钥内容
             return SendMessageResponse(
                 success=False,
                 message="API秘钥验证失败"

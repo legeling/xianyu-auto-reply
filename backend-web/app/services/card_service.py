@@ -1002,7 +1002,17 @@ class CardService:
             
             if not url:
                 return None
-            
+
+            # 安全（M7 修复）：API 卡券取数地址由用户配置，服务端代为请求，
+            # 属于认证后 SSRF 入口。此处强制校验目标：仅 http/https 且
+            # 解析后不得指向内网/保留地址段（卡券上游应为公网服务，
+            # 不提供内网放行开关，防止借发货链路探测/读取内网）。
+            from common.utils.url_security import validate_public_url
+            url_error = await validate_public_url(url)
+            if url_error:
+                logger.error(f"调用卡券API被拒绝（SSRF防护）: card_id={card.id}, {url_error}")
+                return None
+
             async with httpx.AsyncClient(timeout=30) as client:
                 if method == "GET":
                     response = await client.get(url, headers=headers, params=params)

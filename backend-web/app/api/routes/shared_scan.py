@@ -30,6 +30,7 @@ from common.models.shared_scan_worker import SharedScanWorker
 from common.models.user import User
 from common.schemas.common import ApiResponse
 from common.services.account_limit_service import AccountLimitExceededError
+from common.utils.internal_auth import build_internal_headers
 
 router = APIRouter(prefix="/shared-scan", tags=["共享多人扫码登录"])
 
@@ -595,6 +596,8 @@ async def _handle_scan_success(
             response = await client.post(
                 f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/{endpoint}",
                 json={"cookie_value": cookies_str, "user_id": owner_id},
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                headers=build_internal_headers(settings),
             )
             if response.get("success"):
                 logger.info(f"共享扫码登录：账号 WebSocket 任务已{'启动' if is_new else '重启'} {account.account_id}")

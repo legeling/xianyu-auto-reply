@@ -29,6 +29,7 @@ import aiohttp
 from loguru import logger
 
 from common.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from common.services.captcha.concurrency import (
     account_browser_lock_manager,
     concurrency_manager,
@@ -235,6 +236,8 @@ class CookieRenewBrowserService:
                 async with session.post(
                     renew_url,
                     json={"account_id": account_id, "cookies_str": cookies_str},
+                    # 内部接口鉴权头（X-Internal-Token 共享密钥，对端 fail-closed 校验）
+                    headers=build_internal_headers(settings),
                 ) as response:
                     if response.status != 200:
                         text = await response.text()

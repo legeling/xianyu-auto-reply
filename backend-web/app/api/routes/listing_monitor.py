@@ -21,6 +21,7 @@ from app.services.listing_monitor_service import ListingMonitorService, _task_to
 from common.models.user import User
 from common.schemas.common import ApiResponse
 from common.utils.auth_scope import resolve_owner_scope
+from common.utils.internal_auth import build_internal_headers
 
 router = APIRouter(prefix="/product-monitor/listing-tasks", tags=["商品上新监控"])
 
@@ -221,7 +222,8 @@ async def run_listing_monitor_task(
     http_client = get_http_client()
     url = f"{settings.scheduler_service_url}/internal/tasks/listing_monitor/run/{task_id}"
     try:
-        resp = await http_client.post(url)
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+        resp = await http_client.post(url, headers=build_internal_headers(settings))
     except Exception as exc:  # noqa: BLE001
         return ApiResponse(success=False, message=f"调用采集服务失败：{exc}")
     if not isinstance(resp, dict) or not resp.get("success"):

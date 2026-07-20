@@ -12,9 +12,10 @@ import json
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator
 
 from common.core.config import BaseConfig
+from common.utils.security import is_weak_jwt_secret
 
 
 class PromotionConfig(BaseConfig):
@@ -34,13 +35,26 @@ class PromotionConfig(BaseConfig):
     service_port: int = Field(default=8092, alias="PROMOTION_PORT")
 
     # JWT配置
-    jwt_secret_key: str = Field(default="change-me", repr=False)
+    # 安全（H1 修复）：jwt_secret_key 无默认值、启动必填（环境变量 JWT_SECRET_KEY），
+    # 且拒绝弱/占位密钥——避免部署时使用恒定的 "change-me" 导致令牌可被任意伪造。
+    jwt_secret_key: str = Field(..., repr=False)
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=30)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
 
     # CORS配置
     cors_origins_raw: str = Field(default="*", alias="CORS_ORIGINS")
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _reject_weak_jwt_secret(cls, value: str) -> str:
+        """安全：启动时拒绝弱/占位 JWT 密钥（fail-closed，配置校验失败即无法启动）。"""
+        if is_weak_jwt_secret(value):
+            raise ValueError(
+                "JWT_SECRET_KEY 为弱/占位密钥或长度不足（至少16位强随机值），"
+                "请使用如 `openssl rand -hex 32` 生成的强随机密钥后重新启动"
+            )
+        return value
 
     # 静态文件目录
     static_dir: str = Field(default="static", alias="STATIC_DIR")

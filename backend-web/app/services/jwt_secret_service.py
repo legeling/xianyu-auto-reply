@@ -87,7 +87,13 @@ async def ensure_jwt_secret_key(settings) -> None:
                 "如有已登录用户，需重新登录一次（仅此一次）"
             )
     except Exception as e:
-        # 数据库不可用等异常不应阻断启动；此时退回使用配置默认值，仅告警
+        # 安全（M3 修复）：JWT 密钥初始化失败必须 fail-closed——
+        # 若回退到 "change-me" 默认密钥，任何人都能伪造管理员令牌。
+        # 抛出让服务启动失败；正常路径（数据库可用）不受影响。
         logger.opt(exception=e).error(
-            "初始化 JWT 密钥失败（数据库不可用？），本次启动将使用配置默认值；恢复数据库后重启即可统一托管"
+            "初始化 JWT 密钥失败（数据库不可用？）。出于安全考虑服务拒绝在未知密钥状态下启动，"
+            "请恢复数据库后重新启动"
         )
+        raise RuntimeError(
+            "JWT 密钥初始化失败：无法从数据库加载或持久化密钥，服务拒绝启动（fail-closed）"
+        ) from e

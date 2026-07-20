@@ -25,6 +25,7 @@ from app.core.config import get_settings
 from app.core.http_client import get_http_client
 from common.models.user import User
 from common.schemas.common import ApiResponse
+from common.utils.internal_auth import build_internal_headers
 from common.utils.service_restart import (
     SERVICE_META,
     detect_runtime,
@@ -172,7 +173,8 @@ async def _remote_self_restart(service_key: str) -> tuple[bool, str]:
     url = f"{base_url}/internal/system/self-restart"
     try:
         http_client = get_http_client()
-        response = await http_client.post(url)
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+        response = await http_client.post(url, headers=build_internal_headers(get_settings()))
         success = bool(response.get("success"))
         return success, response.get("message") or ""
     except Exception as e:

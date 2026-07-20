@@ -27,6 +27,7 @@ from common.models.xy_order import XYOrder
 from common.utils.time_utils import get_beijing_now_naive
 from common.models.card import Card
 from app.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from app.core.http_client import get_http_client
 
 
@@ -595,7 +596,10 @@ class RedeliveryTask:
                 }
                 
                 logger.info(f"[定时补发货] 调用WebSocket服务发货: {order_no}")
-                result = await http_client.post(deliver_url, json=deliver_data)
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                result = await http_client.post(
+                    deliver_url, json=deliver_data, headers=build_internal_headers(settings)
+                )
                 logger.info(f"[定时补发货] 订单 {order_no} 接口返回: {result}")
                 
                 if result.get('success'):
@@ -734,7 +738,9 @@ class RedeliveryTask:
                 f"[定时补发货] 订单 {order.order_no} 缺少会话ID，"
                 f"调用 WebSocket 服务创建会话: buyer_id={order.buyer_id}, item_id={order.item_id}"
             )
-            result = await http_client.post(create_url, json=create_payload)
+            result = await http_client.post(
+                create_url, json=create_payload, headers=build_internal_headers(settings)
+            )
             
             if not result.get("success"):
                 error_msg = result.get("message", "创建会话失败")

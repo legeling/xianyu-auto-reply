@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import random
 import re
+import secrets
 import string
 import time
 from typing import Optional
@@ -229,8 +230,12 @@ def generate_captcha_image(text: str) -> str:
 
 
 def generate_verification_code(length: int = 6) -> str:
-    """生成数字验证码"""
-    return "".join(random.choices(string.digits, k=length))
+    """生成数字验证码
+
+    安全：邮箱验证码属于认证凭据，必须使用密码学安全随机源（secrets），
+    不能使用可预测的 random 模块。
+    """
+    return "".join(secrets.choice(string.digits) for _ in range(length))
 
 
 # ==================== 内存存储（简化实现，生产环境建议用Redis） ====================
@@ -709,9 +714,12 @@ async def get_remote_config(
         logger.error(f"读取远程过滑块配置失败: {exc}")
         return ApiResponse(success=False, message="读取远程过滑块配置失败，请稍后重试")
     m = {r.key: (r.value or "") for r in rows}
+    # 安全（M2 修复）：远程过滑块共享密钥属于敏感密钥类设置，GET 脱敏返回 "***"，
+    # 前端原样提交回来时 PUT 端会忽略不更新（保留原值）
+    masked_secret = "***" if m.get(REMOTE_CONFIG_SECRET_KEY) else ""
     return ApiResponse(success=True, data={
         "url": m.get(REMOTE_CONFIG_URL_KEY, ""),
-        "secret_key": m.get(REMOTE_CONFIG_SECRET_KEY, ""),
+        "secret_key": masked_secret,
         "pass_cookies": (m.get(REMOTE_CONFIG_PASS_COOKIES_KEY, "") or "").strip().lower() == "true",
         "block_remote_calls": (m.get(REMOTE_CONFIG_BLOCK_REMOTE_CALLS_KEY, "true") or "true").strip().lower() == "true",
         "local_weight": _sanitize_weight(m.get(REMOTE_CONFIG_WEIGHT_LOCAL_KEY), 1.0),
@@ -739,7 +747,6 @@ async def update_remote_config(
 
     settings_to_save: dict[str, tuple[str, str | None]] = {
         REMOTE_CONFIG_URL_KEY: ((request.url or "").strip(), "远程过滑块服务URL"),
-        REMOTE_CONFIG_SECRET_KEY: ((request.secret_key or "").strip(), "远程过滑块秘钥"),
         REMOTE_CONFIG_PASS_COOKIES_KEY: (
             "true" if request.pass_cookies else "false",
             "远程过滑块是否传递账号Cookie",
@@ -758,6 +765,13 @@ async def update_remote_config(
             "real_mouse过滑块远程排队权重",
         ),
     }
+    # 安全：密钥原样提交脱敏占位符 "***" 时忽略不更新（保留原值）；
+    # 提交空字符串表示管理员显式清空，提交其它新值则正常更新
+    if (request.secret_key or "").strip() != "***":
+        settings_to_save[REMOTE_CONFIG_SECRET_KEY] = (
+            (request.secret_key or "").strip(),
+            "远程过滑块秘钥",
+        )
     if request.remote_processing_max is not None:
         settings_to_save[REMOTE_PROCESSING_MAX_KEY] = (
             str(request.remote_processing_max),

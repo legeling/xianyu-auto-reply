@@ -185,20 +185,24 @@ async def get_qr_status(
                     # 调用 WebSocket 服务启动账号任务
                     try:
                         from app.core.config import get_settings
+                        from common.utils.internal_auth import build_internal_headers
                         settings = get_settings()
                         client = get_http_client()
-                        
+
                         # 构建请求参数
                         request_data = {
                             "cookie_value": cookies_str,
                             "user_id": owner_id
                         }
-                        
+                        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                        internal_headers = build_internal_headers(settings)
+
                         if is_new_account:
                             # 新账号：启动任务
                             response = await client.post(
                                 f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/start",
-                                json=request_data
+                                json=request_data,
+                                headers=internal_headers,
                             )
                             if response.get("success"):
                                 logger.info(f"扫码登录：新账号WebSocket任务已启动 {account.account_id}")
@@ -208,7 +212,8 @@ async def get_qr_status(
                             # 现有账号：重启任务
                             response = await client.post(
                                 f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/restart",
-                                json=request_data
+                                json=request_data,
+                                headers=internal_headers,
                             )
                             if response.get("success"):
                                 logger.info(f"扫码登录：现有账号WebSocket任务已重启 {account.account_id}")

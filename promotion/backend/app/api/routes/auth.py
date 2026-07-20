@@ -8,13 +8,15 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from app.core.security import decode_token
 from common.models.user import User, UserRole, UserStatus
 from common.schemas.auth import TokenPayload
+from common.utils.rate_limit import get_client_ip, login_rate_limiter
 
 router = APIRouter(tags=["认证"])
 
@@ -22,6 +24,7 @@ router = APIRouter(tags=["认证"])
 @router.post("/login")
 async def login_user(
     payload: dict,
+    request: Request,
     session: AsyncSession = Depends(deps.get_db_session),
 ):
     """
@@ -31,6 +34,13 @@ async def login_user(
     """
     from app.services.auth_service import AuthService
     auth_service = AuthService(session)
+
+    # 安全：基于客户端 IP 的内存限流，连续失败 5 次锁定 5 分钟（防暴力破解/用户枚举）
+    client_ip = get_client_ip(request)
+    locked, remaining = login_rate_limiter.check_locked(client_ip)
+    if locked:
+        logger.warning(f"【登录限流】拒绝已锁定 IP 的登录请求: {client_ip}")
+        return {"success": False, "message": f"登录失败次数过多，请 {remaining} 秒后再试"}
 
     username = payload.get("username")
     password = payload.get("password")
@@ -66,11 +76,15 @@ async def login_user(
     user, error_message = await auth_service.authenticate_by_username(username, password)
 
     if not user:
-        return {"success": False, "message": error_message or "登录失败"}
+        # 安全：记录失败（触发 IP 限流）；错误消息统一为"用户名或密码错误"，避免用户枚举
+        login_rate_limiter.record_failure(client_ip)
+        logger.warning(f"【登录失败】IP {client_ip} 用户名 {username}: {error_message or '登录失败'}")
+        return {"success": False, "message": "用户名或密码错误"}
 
     if user.status != UserStatus.ACTIVE:
         return {"success": False, "message": "账号已禁用，请联系管理员"}
 
+    login_rate_limiter.record_success(client_ip)
     await auth_service.mark_login(user)
     return {
         "success": True,
@@ -105,7 +119,16 @@ async def refresh_token(
 ):
     """刷新令牌"""
     try:
-        payload = TokenPayload(**decode_token(token))
+        raw_payload = decode_token(token)
+    except (Exception, ValueError):
+        return {"success": False, "message": "令牌无效"}
+
+    # 安全：刷新端点只接受 refresh 类型令牌，拒绝 access token 混淆使用
+    if raw_payload.get("type") != "refresh":
+        return {"success": False, "message": "令牌类型错误"}
+
+    try:
+        payload = TokenPayload(**raw_payload)
     except (Exception, ValueError):
         return {"success": False, "message": "令牌无效"}
 

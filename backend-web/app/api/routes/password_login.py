@@ -28,6 +28,7 @@ from app.services.password_login.manager import SESSION_PREFIX
 from common.models.system_setting import SystemSetting
 from common.models.user import User
 from common.services.account_limit_service import AccountLimitExceededError, AccountLimitService
+from common.utils.internal_auth import build_internal_headers
 
 router = APIRouter(prefix="/password-login", tags=["密码登录"])
 
@@ -116,6 +117,7 @@ async def _proxy_ws_login(request: PasswordLoginRequest, user_id: int) -> dict:
     """代理浏览器登录到 websocket 服务。"""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # 内部接口鉴权头（X-Internal-Token 共享密钥，websocket 侧 fail-closed 校验）
             resp = await client.post(
                 f"{settings.websocket_service_url}/password-login",
                 json={
@@ -125,6 +127,7 @@ async def _proxy_ws_login(request: PasswordLoginRequest, user_id: int) -> dict:
                     "show_browser": True,  # 浏览器方式强制有头
                     "user_id": user_id,
                 },
+                headers=build_internal_headers(settings),
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -154,8 +157,10 @@ async def check_login_status(
     # 浏览器会话：代理 websocket
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            # 内部接口鉴权头（X-Internal-Token 共享密钥）
             resp = await client.get(
-                f"{settings.websocket_service_url}/password-login/check/{session_id}"
+                f"{settings.websocket_service_url}/password-login/check/{session_id}",
+                headers=build_internal_headers(settings),
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -179,8 +184,10 @@ async def cancel_login(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            # 内部接口鉴权头（X-Internal-Token 共享密钥）
             resp = await client.delete(
-                f"{settings.websocket_service_url}/password-login/cancel/{session_id}"
+                f"{settings.websocket_service_url}/password-login/cancel/{session_id}",
+                headers=build_internal_headers(settings),
             )
             if resp.status_code == 200:
                 return resp.json()

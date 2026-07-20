@@ -6,16 +6,35 @@ import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 
 from app.api import deps
-from common.models.user import User
+from app.core.config import get_settings
+from common.models.user import User, UserRole
 from common.schemas.ai_reply import AIModelListRequest, AIReplySettings, AIReplySettingsUpdate
 from common.schemas.common import ApiResponse
 from common.services.ai_provider_service import fetch_ai_model_list, test_ai_connection
 from common.utils.auth_scope import resolve_owner_scope
+from common.utils.url_security import validate_public_url
 from app.services.account_service import AccountService
 from app.services.ai_reply_service import AIReplySettingsService
 
 router = APIRouter(tags=["ai"])
 test_router = APIRouter(prefix="/ai-reply-test", tags=["ai"])
+
+
+async def _check_ai_base_url_allowed(base_url: str, current_user: User) -> str | None:
+    """校验 AI base_url 的外发安全性（SSRF 防护，M7 修复）。
+
+    说明：AI base_url 可能合法指向内网部署的开源模型（如内网 vLLM/Ollama），
+    因此内网地址仅对两类情况放行：
+    1) 管理员用户（信任其配置内网模型的意图）；
+    2) 环境变量 ALLOW_PRIVATE_BASE_URL=true 显式开启（部署方自行承担风险）。
+    普通用户默认仅允许公网地址。
+    返回 None 表示允许，否则返回错误提示。
+    """
+    allow_private = (
+        current_user.role == UserRole.ADMIN
+        or get_settings().allow_private_base_url
+    )
+    return await validate_public_url(base_url, allow_private=allow_private)
 
 
 @router.get("", response_model=dict[str, AIReplySettings])
@@ -32,6 +51,16 @@ async def fetch_ai_reply_models(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> ApiResponse:
     """手动获取AI模型列表，失败时返回空列表，由前端切换为手动输入"""
+    # 安全（M7 修复）：base_url 由用户提交，服务端代为请求，先做 SSRF 校验；
+    # base_url 为空时下游会使用各服务商的内置公网默认地址，无需校验
+    if (payload.base_url or "").strip():
+        url_error = await _check_ai_base_url_allowed(payload.base_url, current_user)
+        if url_error:
+            return ApiResponse(
+                success=False,
+                message=f"AI 地址未通过安全检查：{url_error}",
+                data={"models": []},
+            )
     try:
         models = await fetch_ai_model_list(
             payload.provider_type,
@@ -144,7 +173,14 @@ async def test_ai_reply_settings(
     provider_type = settings.get("provider_type", "openai_compatible")
     base_url = settings.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     model_name = settings.get("model_name", "qwen-plus")
-    
+
+    # 安全（M7 修复）：base_url 由用户配置，服务端代为请求，先做 SSRF 校验；
+    # base_url 为空时下游会使用各服务商的内置公网默认地址，无需校验
+    if (base_url or "").strip():
+        url_error = await _check_ai_base_url_allowed(base_url, current_user)
+        if url_error:
+            return ApiResponse(success=False, message=f"AI 地址未通过安全检查：{url_error}")
+
     try:
         reply = await test_ai_connection(provider_type, base_url, api_key, model_name)
         return ApiResponse(success=True, message=f"AI连接测试成功！模型回复: {reply[:100]}")

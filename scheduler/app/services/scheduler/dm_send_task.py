@@ -37,6 +37,7 @@ from loguru import logger
 from sqlalchemy import and_, select
 
 from app.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from app.core.http_client import get_http_client
 from common.db.session import async_session_maker
 from common.models.listing_monitor_item import ListingMonitorItem
@@ -357,7 +358,9 @@ class DmSendTaskService:
         create_url = f"{base_url}/internal/accounts/{account_id}/create-chat"
         try:
             create_res = await http_client.post(
-                create_url, json={"buyer_id": str(seller_user_id), "item_id": str(item_id)}
+                create_url, json={"buyer_id": str(seller_user_id), "item_id": str(item_id)},
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                headers=build_internal_headers(settings),
             )
         except Exception as exc:  # noqa: BLE001
             reason = f"创建会话异常：{exc}"
@@ -380,7 +383,9 @@ class DmSendTaskService:
         send_url = f"{base_url}/internal/accounts/{account_id}/send-message"
         try:
             send_res = await http_client.post(
-                send_url, json={"chat_id": chat_id, "message": content, "wait_result": True}
+                send_url, json={"chat_id": chat_id, "message": content, "wait_result": True},
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                headers=build_internal_headers(settings),
             )
         except Exception as exc:  # noqa: BLE001
             reason = f"发送私信异常：{exc}"

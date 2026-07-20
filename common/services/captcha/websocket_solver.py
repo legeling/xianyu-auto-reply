@@ -50,9 +50,14 @@ async def solve_captcha_via_websocket(
         "device_id": device_id,
     }
     try:
+        # 内部接口鉴权头（X-Internal-Token 共享密钥，对端 fail-closed 校验）
+        from common.utils.internal_auth import build_internal_headers
+
         timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(endpoint, json=payload) as response:
+            async with session.post(
+                endpoint, json=payload, headers=build_internal_headers()
+            ) as response:
                 result = await response.json(content_type=None)
                 if isinstance(result, dict):
                     return result

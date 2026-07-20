@@ -74,6 +74,12 @@ class BaseConfig(BaseSettings):
     access_token_expire_minutes: int = Field(default=30)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
 
+    # 服务间内部接口共享密钥（X-Internal-Token）：保护 /internal/*、/password-login
+    # 等内部接口。所有服务必须配置相同的值（环境变量 INTERNAL_API_TOKEN）。
+    # 安全策略为 fail-closed：未配置时内部接口拒绝所有请求（503），详见
+    # common/utils/internal_auth.py。
+    internal_api_token: str | None = Field(default=None, repr=False)
+
     # 服务监听地址：`::` 同时监听 IPv4 和 IPv6（dual-stack），
     # 适用于 Linux/macOS；如需仅监听 IPv4 可设为 0.0.0.0
     host: str = Field(default="::")

@@ -15,6 +15,7 @@ from loguru import logger
 
 from common.models.xy_account import XYAccount
 from app.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from app.core.http_client import get_http_client
 
 
@@ -39,6 +40,8 @@ class CookiesRefreshBrowserService:
             response = await http_client.post(
                 f"{settings.websocket_service_url}/internal/cookies/refresh",
                 json={"account_id": account.account_id},
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                headers=build_internal_headers(settings),
             )
         except Exception as exc:
             logger.error(f"【COOKIES续期】账号 {account.account_id} 调用 websocket COOKIES续期接口失败: {exc}")

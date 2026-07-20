@@ -18,11 +18,20 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from loguru import logger
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/password-login", tags=["密码登录"])
+from app.core.config import get_settings
+from common.utils.internal_auth import make_internal_token_dependency
+
+# 安全：密码登录接口仅供 backend-web 代理调用，属服务间内部接口，
+# 统一挂载 X-Internal-Token 共享密钥鉴权（fail-closed，详见 common/utils/internal_auth.py）
+router = APIRouter(
+    prefix="/password-login",
+    tags=["密码登录"],
+    dependencies=[Depends(make_internal_token_dependency(get_settings))],
+)
 
 
 # ==================== 请求/响应模型 ====================

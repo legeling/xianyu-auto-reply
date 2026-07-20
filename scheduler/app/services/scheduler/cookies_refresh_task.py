@@ -32,6 +32,7 @@ from common.utils.cookie_refresh import (
 )
 from common.utils.time_utils import get_beijing_now_naive
 from app.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from app.core.http_client import get_http_client
 from app.services.cookies_refresh_browser_service import cookies_refresh_browser_service
 
@@ -165,7 +166,7 @@ class CookiesRefreshTaskService:
             resp = await http_client.post(start_url, json={
                 "cookie_value": account.cookie or "",
                 "user_id": account.owner_id,
-            })
+            }, headers=build_internal_headers(settings))  # 内部接口鉴权头（X-Internal-Token 共享密钥）
             ws_success = resp.get("success", False) if isinstance(resp, dict) else False
             if ws_success:
                 logger.info(

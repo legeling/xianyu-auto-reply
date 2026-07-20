@@ -245,12 +245,15 @@ async def trigger_manual_refresh(
         try:
             import httpx
             from app.core.config import get_settings
-            
+            from common.utils.internal_auth import build_internal_headers
+
             settings = get_settings()
-            websocket_url = f"{settings.WEBSOCKET_SERVICE_URL}/internal/accounts/{account_id}/refresh-token"
-            
+            # 修正：配置字段名为 websocket_service_url（小写），原大写属性不存在会抛 AttributeError
+            websocket_url = f"{settings.websocket_service_url}/internal/accounts/{account_id}/refresh-token"
+
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(websocket_url)
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                response = await client.post(websocket_url, headers=build_internal_headers(settings))
                 
                 if response.status_code == 200:
                     logger.info(f"【Cookie刷新】成功触发WebSocket服务刷新: account_id={account_id}")

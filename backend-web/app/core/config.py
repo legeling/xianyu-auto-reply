@@ -41,6 +41,15 @@ class BackendWebConfig(BaseConfig):
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=30)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
+
+    # 外部消息发送接口（/api/v1/message/send）的 API 密钥
+    # 安全（H3 修复）：不再内置硬编码默认密钥；未配置（环境变量 API_SECRET_KEY）时
+    # 该接口 fail-closed 返回 503，防止使用源码中可公开获取的弱密钥。
+    api_secret_key: str | None = Field(default=None, repr=False)
+
+    # 是否允许 AI base_url / Webhook 等外发地址指向内网/保留地址段（SSRF 防护开关）。
+    # 默认 false：拒绝内网地址；确有内网部署开源模型等合法需求时可显式开启。
+    allow_private_base_url: bool = Field(default=False, alias="ALLOW_PRIVATE_BASE_URL")
     
     # CORS配置
     cors_origins_raw: str = Field(default="*", alias="CORS_ORIGINS")

@@ -30,6 +30,7 @@ from common.models.user import User
 from common.models.xy_account import XYAccount
 from common.schemas.common import ApiResponse
 from common.utils.auth_scope import is_admin_user
+from common.utils.internal_auth import build_internal_headers
 from common.utils.xianyu_utils import trans_cookies
 
 router = APIRouter(prefix="/external/account-cookie", tags=["外部Cookie同步"])
@@ -68,7 +69,10 @@ async def _notify_scheduler_clear_cooldown(account_id: str) -> None:
 
         settings = get_settings()
         url = f"{settings.scheduler_service_url}/internal/account-cooldown/clear"
-        await get_http_client().post(url, json={"account_id": account_id})
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+        await get_http_client().post(
+            url, json={"account_id": account_id}, headers=build_internal_headers(settings)
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             f"[外部Cookie同步] 通知 scheduler 解除账号冷却失败（不影响 Cookie 更新）"

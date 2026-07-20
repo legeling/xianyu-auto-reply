@@ -22,6 +22,7 @@ from sqlalchemy import delete as sql_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from common.utils.internal_auth import build_internal_headers
 from app.core.http_client import get_http_client
 from common.db.session import async_session_maker
 from common.models.scheduled_api_cookie_renew_log import ScheduledApiCookieRenewLog
@@ -212,6 +213,8 @@ class ApiCookieRenewTaskService:
                     "cookie_value": account.cookie or "",
                     "user_id": account.owner_id,
                 },
+                # 内部接口鉴权头（X-Internal-Token 共享密钥）
+                headers=build_internal_headers(settings),
             )
             ws_success = resp.get("success", False) if isinstance(resp, dict) else False
             if ws_success:

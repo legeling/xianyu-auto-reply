@@ -108,6 +108,10 @@ def create_access_token(
         to_encode = subject.copy()
         to_encode.setdefault("sub", subject.get("sub"))
 
+    # 安全：显式标记令牌类型，防止 refresh token 被当作 access token 使用（令牌类型混淆）。
+    # 校验端对无 type 字段的旧令牌按 access 兼容处理，不影响存量会话。
+    to_encode["type"] = "access"
+
     expires_delta = expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     expire = datetime.now(tz=timezone.utc) + expires_delta
     to_encode.update({"exp": expire})

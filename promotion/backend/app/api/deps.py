@@ -43,7 +43,16 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = TokenPayload(**decode_token(token))
+        raw_payload = decode_token(token)
+    except (JWTError, ValueError):
+        raise credentials_exception
+    # 安全：拒绝 refresh token 充当 access token（令牌类型混淆）。
+    # 兼容说明：旧版 access token 未写入 type 字段，按 access 处理；
+    # 仅显式标记为非 access 的令牌（如 refresh）被拒绝，不影响存量会话。
+    if raw_payload.get("type", "access") != "access":
+        raise credentials_exception
+    try:
+        payload = TokenPayload(**raw_payload)
     except (JWTError, ValueError):
         raise credentials_exception
     if payload.sub is None:

@@ -14,9 +14,15 @@ from typing import Optional
 from app.core.config import get_settings
 from app.core.http_client import get_http_client
 from common.services.captcha.remote_timeout import get_remote_solve_timeout
+from common.utils.internal_auth import build_internal_headers
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _internal_headers() -> dict:
+    """内部接口鉴权头（X-Internal-Token 共享密钥，详见 common/utils/internal_auth.py）"""
+    return build_internal_headers(settings)
 
 
 class WebSocketServiceClient:
@@ -44,7 +50,7 @@ class WebSocketServiceClient:
                 data["cookie_value"] = cookie_value
             if user_id:
                 data["user_id"] = user_id
-            response = await self.http_client.post(url, json=data if data else {})
+            response = await self.http_client.post(url, json=data if data else {}, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"启动账号任务失败: {account_id}, 错误: {e}")
@@ -61,7 +67,7 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/stop"
         try:
-            response = await self.http_client.post(url)
+            response = await self.http_client.post(url, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"停止账号任务失败: {account_id}, 错误: {e}")
@@ -78,7 +84,7 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/restart"
         try:
-            response = await self.http_client.post(url, json={})
+            response = await self.http_client.post(url, json={}, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"重启账号任务失败: {account_id}, 错误: {e}")
@@ -95,7 +101,7 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/status"
         try:
-            response = await self.http_client.get(url)
+            response = await self.http_client.get(url, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"查询账号任务状态失败: {account_id}, 错误: {e}")
@@ -119,7 +125,7 @@ class WebSocketServiceClient:
                 "chat_id": chat_id,
                 "content": content,
                 "message_type": message_type
-            })
+            }, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"发送消息失败: {account_id}, 错误: {e}")
@@ -152,7 +158,7 @@ class WebSocketServiceClient:
             response = await self.http_client.post(url, json={
                 "buyer_id": buyer_id,
                 "item_id": item_id,
-            })
+            }, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"创建会话失败: account_id={account_id}, buyer_id={buyer_id}, 错误: {e}")
@@ -201,7 +207,7 @@ class WebSocketServiceClient:
                 "is_bargain": is_bargain,
                 "delivery_method": delivery_method,
                 "quantity": int(quantity) if quantity and quantity > 0 else 1,
-            })
+            }, headers=_internal_headers())
             return response
         except Exception as e:
             logger.error(f"订单发货失败: {order_no}, 错误: {e}")
@@ -225,7 +231,7 @@ class WebSocketServiceClient:
                 "item_id": item_id,
                 "buyer_id": buyer_id,
                 "is_bargain": is_bargain,
-            })
+            }, headers=_internal_headers())
         except Exception as e:
             logger.error(f"无物流发货失败: {order_no}, 错误: {e}")
             return {"success": False, "message": f"无物流发货失败: {str(e)}"}
@@ -236,6 +242,7 @@ class WebSocketServiceClient:
             return await self.http_client.post(
                 f"{self.base_url}/internal/orders/cancel",
                 json={"account_id": account_id, "order_no": order_no},
+                headers=_internal_headers(),
             )
         except Exception as e:
             logger.error(f"取消订单失败: {order_no}, 错误: {e}")
@@ -292,7 +299,7 @@ class WebSocketServiceClient:
                     "cookies": cookies or "",
                     "device_id": device_id or "",
                     "risk_log_id": precreated_log_id,
-                }) as resp:
+                }, headers=_internal_headers()) as resp:
                     return await resp.json(content_type=None)
         except request_not_sent_errors as e:
             logger.error(f"无法连接过滑块服务: account_id={account_id}, 错误: {e}")

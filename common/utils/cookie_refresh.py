@@ -464,11 +464,15 @@ def _do_password_login_via_api(account_id: str) -> None:
         
         # 调用密码登录刷新API
         api_url = f"{websocket_url}/internal/accounts/{account_id}/password-login-refresh"
-        
+
         try:
+            from common.utils.internal_auth import build_internal_headers
+
             response = requests.post(
                 api_url,
                 json={"trigger_reason": "Session过期"},
+                # 内部接口鉴权头（X-Internal-Token 共享密钥，websocket 侧 fail-closed 校验）
+                headers=build_internal_headers(settings),
                 timeout=10  # API立即返回，无需长时间等待
             )
             

@@ -10,17 +10,24 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.config import get_settings
 from common.services.captcha.concurrency import run_browser_task
 from common.services.captcha.slider_mode import (
     SLIDER_MODE_REAL_MOUSE,
     refresh_slider_mode_from_database,
 )
 from common.services.captcha.weighted_runner import real_mouse_weighted_runner
+from common.utils.internal_auth import make_internal_token_dependency
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+# 安全：内部接口统一鉴权（X-Internal-Token 共享密钥，fail-closed，详见 common/utils/internal_auth.py）
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(make_internal_token_dependency(get_settings))],
+)
 
 
 class StartAccountRequest(BaseModel):

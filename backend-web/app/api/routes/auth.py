@@ -8,6 +8,7 @@
 4. 用户登出
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,10 +19,14 @@ from common.models.user import User, UserRole, UserStatus
 from common.schemas.auth import LoginRequest, LoginResponse, VerifyResponse
 from common.schemas.common import ApiResponse
 from common.schemas.user import UserCreate, UserPublic
+from common.utils.rate_limit import get_client_ip, login_rate_limiter
 from app.services.auth import AuthService
 from app.services.user_service import UserService
 
 router = APIRouter(tags=["auth"])
+
+# 登录失败统一提示：不区分"用户不存在"与"密码错误"，避免用户枚举
+_LOGIN_FAIL_MESSAGE = "用户名或密码错误"
 
 
 class ResetPasswordRequest(BaseModel):
@@ -34,11 +39,19 @@ class ResetPasswordRequest(BaseModel):
 @router.post("/login", response_model=LoginResponse)
 async def login_user(
     payload: LoginRequest,
+    request: Request,
     auth_service: AuthService = Depends(deps.get_auth_service),
     session: AsyncSession = Depends(deps.get_db_session),
 ) -> LoginResponse:
     user: User | None = None
     error_message: str | None = None
+
+    # 安全：基于客户端 IP 的内存限流，连续失败 5 次锁定 5 分钟（防暴力破解/用户枚举）
+    client_ip = get_client_ip(request)
+    locked, lock_remaining = login_rate_limiter.check_locked(client_ip)
+    if locked:
+        logger.warning(f"【登录限流】拒绝已锁定 IP 的登录请求: {client_ip}")
+        return LoginResponse(success=False, message=f"登录失败次数过多，请 {lock_remaining} 秒后再试")
 
     # 检查是否启用了登录滑动验证码
     from app.services.system_setting_service import SystemSettingService
@@ -85,16 +98,24 @@ async def login_user(
         user_service = UserService(session)
         user = await user_service.get_by_email(payload.email)
         if not user:
-            return LoginResponse(success=False, message="该邮箱未注册")
+            # 安全：统一登录失败提示，避免通过邮箱验证码登录路径枚举已注册邮箱
+            logger.info(f"【登录失败】邮箱验证码登录的邮箱未注册: {payload.email} (IP {client_ip})")
+            login_rate_limiter.record_failure(client_ip)
+            return LoginResponse(success=False, message=_LOGIN_FAIL_MESSAGE)
     else:
         return LoginResponse(success=False, message="请提供有效的登录信息")
 
     if not user:
-        return LoginResponse(success=False, message=error_message or "登录失败")
+        # 安全：记录失败（触发 IP 限流）；统一提示"用户名或密码错误"，
+        # 具体原因（不存在/密码错误/剩余次数）仅写入服务端日志，不返回给客户端
+        login_rate_limiter.record_failure(client_ip)
+        logger.info(f"【登录失败】IP {client_ip}: {error_message or '登录失败'}")
+        return LoginResponse(success=False, message=_LOGIN_FAIL_MESSAGE)
 
     if user.status != UserStatus.ACTIVE:
         return LoginResponse(success=False, message="账号已禁用，请联系管理员")
 
+    login_rate_limiter.record_success(client_ip)
     await auth_service.mark_login(user)
     return LoginResponse(
         success=True,
@@ -121,6 +142,11 @@ async def verify_token(
     try:
         payload = decode_token(token)
     except ValueError:
+        return VerifyResponse(authenticated=False)
+
+    # 安全：与 get_current_user 一致的令牌类型校验（拒绝 refresh token 混淆使用；
+    # 无 type 字段的旧令牌按 access 兼容处理）
+    if payload.get("type", "access") != "access":
         return VerifyResponse(authenticated=False)
 
     sub = payload.get("sub")
@@ -208,7 +234,21 @@ async def check_default_password(
 async def register_user(
     payload: UserCreate,
     user_service: UserService = Depends(deps.get_user_service),
+    session: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
+    # 安全（M1 修复）：注册开关在服务端强制校验——此前仅前端隐藏注册入口，
+    # 直接调用 API 即可绕过。registration_enabled 显式为 false 时拒绝注册（403）。
+    from app.services.system_setting_service import SystemSettingService
+    setting_service = SystemSettingService(session)
+    all_settings = await setting_service.list_settings()
+    registration_enabled = str(all_settings.get("registration_enabled") or "").strip().lower()
+    if registration_enabled in ("false", "0", "no", "off"):
+        logger.warning("注册接口被拒绝：系统已关闭注册（registration_enabled=false）")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="系统当前未开放注册",
+        )
+
     # 验证邮箱验证码
     if payload.email and payload.verification_code:
         code_valid, code_msg = check_email_code(payload.email, payload.verification_code, "register")

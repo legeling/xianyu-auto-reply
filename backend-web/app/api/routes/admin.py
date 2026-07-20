@@ -37,6 +37,7 @@ from app.services.scheduled_batch_log_service import ScheduledBatchLogService
 from app.services.user_service import UserService
 from app.services.recharge_service import RechargeService
 from common.services.settlement_service import BALANCE_KEY
+from common.utils.internal_auth import build_internal_headers
 
 from common.utils.time_utils import get_beijing_now_naive, safe_isoformat
 router = APIRouter(tags=["admin"])
@@ -731,13 +732,14 @@ async def _notify_scheduler_reload() -> bool:
     from app.core.http_client import get_http_client
     from app.core.config import get_settings
     from loguru import logger
-    
+
     try:
         settings = get_settings()
         http_client = get_http_client()
         url = f"{settings.scheduler_service_url}/internal/tasks/reload"
-        
-        response = await http_client.post(url)
+
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+        response = await http_client.post(url, headers=build_internal_headers(settings))
         
         if response.get("success"):
             logger.info("[定时任务配置] 已通知Scheduler服务重新加载配置")
@@ -847,7 +849,8 @@ async def update_scheduled_task(
         try:
             http_client = get_http_client()
             url = f"{settings.scheduler_service_url}/internal/tasks/reload"
-            response = await http_client.post(url)
+            # 内部接口鉴权头（X-Internal-Token 共享密钥）
+            response = await http_client.post(url, headers=build_internal_headers(settings))
             if response.get("success"):
                 reload_success = True
                 logger.info(f"[定时任务配置] 已通知Scheduler服务重新加载配置: {task_code}")
@@ -893,7 +896,8 @@ async def trigger_scheduled_task(
     try:
         http_client = get_http_client()
         url = f"{settings.scheduler_service_url}/internal/tasks/{task_code}/trigger"
-        response = await http_client.post(url)
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
+        response = await http_client.post(url, headers=build_internal_headers(settings))
         
         if response.get("success"):
             logger.info(f"[定时任务] 手动触发任务成功: {task_code}")

@@ -23,6 +23,7 @@ from app.services.account_service import AccountService
 from app.services.websocket_client import websocket_client
 from common.db.session import async_session_maker
 from common.services.captcha.remote_solver import solve_remote
+from common.utils.internal_auth import build_internal_headers
 from common.services.xianyu_login.face_verification import (
     FaceVerificationError,
     run_face_verification_flow,
@@ -156,9 +157,11 @@ async def _save_and_start(
         settings = get_settings()
         client = get_http_client()
         endpoint = "start" if is_new else "restart"
+        # 内部接口鉴权头（X-Internal-Token 共享密钥）
         await client.post(
             f"{settings.websocket_service_url}/internal/accounts/{account_id}/{endpoint}",
             json={"cookie_value": cookies_str, "user_id": owner_id},
+            headers=build_internal_headers(settings),
         )
     except Exception as ws_e:
         logger.error(f"【{account_id}】协议登录成功但起 WebSocket 失败: {ws_e}")

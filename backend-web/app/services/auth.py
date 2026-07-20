@@ -1,4 +1,4 @@
-﻿"""
+"""
 认证服务
 
 功能：
@@ -60,20 +60,23 @@ class AuthService:
         """
         处理登录失败，增加失败次数
         返回: 错误提示信息
+
+        安全：返回给客户端的消息与"用户不存在"保持一致（"用户名或密码错误"），
+        不透露剩余尝试次数等仅对已知账号才有意义的信息，避免用户枚举；
+        剩余次数/锁定信息仍写入失败计数供账号锁定逻辑使用。
         """
         user.login_fail_count = (user.login_fail_count or 0) + 1
-        remaining_attempts = MAX_LOGIN_FAIL_COUNT - user.login_fail_count
-        
+
         if user.login_fail_count >= MAX_LOGIN_FAIL_COUNT:
             # 达到最大失败次数，锁定账号（使用北京时间）
             user.login_locked_until = get_beijing_now() + timedelta(hours=LOGIN_LOCK_HOURS)
             await self.session.flush()
             await self.session.commit()
-            return f"密码错误次数过多，账号已被锁定{LOGIN_LOCK_HOURS}小时"
-        
+            return "用户名或密码错误"
+
         await self.session.flush()
         await self.session.commit()
-        return f"用户名或密码错误，还剩{remaining_attempts}次尝试机会"
+        return "用户名或密码错误"
 
     async def _reset_login_fail(self, user: User) -> None:
         """登录成功后重置失败次数"""

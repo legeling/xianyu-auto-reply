@@ -112,6 +112,21 @@ async def test_notification_channel(
         elif channel_type == 'email':
             await send_email_notification(config_data, test_message)
         elif channel_type == 'webhook':
+            # 安全（M7 修复）：Webhook URL 由用户配置，服务端代为请求，
+            # 属于认证后 SSRF 入口。仅 http/https 且默认不得指向内网/保留地址段；
+            # 确有内网 Webhook 需求时仅管理员或 ALLOW_PRIVATE_BASE_URL=true 放行。
+            from app.core.config import get_settings
+            from common.models.user import UserRole
+            from common.utils.url_security import validate_public_url
+
+            webhook_url = (config_data.get('webhook_url') or '').strip()
+            allow_private = (
+                current_user.role == UserRole.ADMIN
+                or get_settings().allow_private_base_url
+            )
+            url_error = await validate_public_url(webhook_url, allow_private=allow_private)
+            if url_error:
+                return ApiResponse(success=False, message=f"Webhook 地址未通过安全检查：{url_error}")
             await send_webhook_notification(config_data, test_message)
         elif channel_type == 'wechat':
             await send_wechat_notification(config_data, test_message)
