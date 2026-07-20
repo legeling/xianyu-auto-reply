@@ -67,7 +67,9 @@ export default defineConfig({
   },
   server: {
     port: 9000,
-    host: '0.0.0.0', // 允许外部访问
+    // 仅限本地开发：0.0.0.0 允许局域网访问 dev server（生产部署走 nginx，不经过 vite）
+    // 注意：dev server 无鉴权，请勿在不可信网络环境或公网机器上运行 npm run dev
+    host: '0.0.0.0',
     allowedHosts: [
       'localhost',
       '127.0.0.1',

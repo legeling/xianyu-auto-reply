@@ -62,9 +62,40 @@ echo "[信息] Compose: $DC"
 echo "[信息] 项目目录: $WORK_DIR"
 echo ""
 
+# ========== 密钥工具函数 ==========
+# 生成随机密钥（24位字母数字，安全无特殊字符）
+generate_random_secret() {
+    openssl rand -base64 24 | tr -d '=+/' | cut -c1-24
+}
+
+# 确保 .env 中某个 key 存在且非空；缺失或为空时写入随机值
+# 注意：已存在的值必须保留不变，否则现有数据库密码被改会导致服务无法连接
+ensure_env_secret() {
+    local key="$1"
+    local current
+    current=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d '\r')
+    if [ -z "$current" ]; then
+        local value
+        value=$(generate_random_secret)
+        if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+            # key 存在但值为空，原地替换（sed -i.bak 兼容 GNU/BSD）
+            sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        else
+            echo "${key}=${value}" >> "$ENV_FILE"
+        fi
+        echo -e "${YELLOW}[安全] 已为 ${key} 生成随机密码/密钥，请妥善保管 $ENV_FILE${NC}"
+    fi
+}
+
 # ========== 生成 .env（首次） ==========
 generate_env() {
     if [ -f "$ENV_FILE" ]; then
+        # 已存在 .env：仅补齐缺失/为空的密钥，已有值保持不变
+        ensure_env_secret MYSQL_ROOT_PASSWORD
+        ensure_env_secret MYSQL_PASSWORD
+        ensure_env_secret REDIS_PASSWORD
+        ensure_env_secret JWT_SECRET_KEY
+        ensure_env_secret INTERNAL_API_TOKEN
         return
     fi
     echo -e "${YELLOW}[提示] 首次构建，生成默认 .env 配置${NC}"
@@ -73,17 +104,21 @@ generate_env() {
 # 闲鱼自动回复系统 - 环境变量配置（本地构建）
 # ==========================================
 
-# MySQL数据库
-MYSQL_ROOT_PASSWORD=xianyu@2026
+# MySQL数据库（密码留空，构建脚本会自动生成随机值；已生成的值请勿随意修改）
+MYSQL_ROOT_PASSWORD=
 MYSQL_DATABASE=xianyu_data
 MYSQL_USER=xianyu
-MYSQL_PASSWORD=xianyu@2026
+MYSQL_PASSWORD=
 
 # Redis
-REDIS_PASSWORD=xianyu@2026
+REDIS_PASSWORD=
 REDIS_DB=0
 
-# 说明：JWT 密钥由数据库统一托管（首次启动自动生成并持久化），无需在此配置
+# 说明：backend-web 的 JWT 密钥由数据库统一托管（首次启动自动生成并持久化），无需在此配置
+# JWT_SECRET_KEY：promotion/backend 启动必填的 JWT 签名密钥（本地 promotion 服务使用，脚本自动生成随机值）
+JWT_SECRET_KEY=
+# INTERNAL_API_TOKEN：服务间内部 API 调用凭证（websocket/scheduler 校验 + backend-web/scheduler 调用方带头，脚本自动生成随机值）
+INTERNAL_API_TOKEN=
 
 # 端口
 FRONTEND_PORT=9000
@@ -105,6 +140,12 @@ RATE_INTERVAL=20
 # 验证码并发数
 MAX_CAPTCHA_CONCURRENT=3
 ENVEOF
+    # 填充随机密钥（模板中密钥留空）
+    ensure_env_secret MYSQL_ROOT_PASSWORD
+    ensure_env_secret MYSQL_PASSWORD
+    ensure_env_secret REDIS_PASSWORD
+    ensure_env_secret JWT_SECRET_KEY
+    ensure_env_secret INTERNAL_API_TOKEN
     echo -e "${GREEN}✓ 已生成 .env 文件，如需修改请编辑后重新运行${NC}"
     echo ""
     # 重新设置 DC_CMD 以包含 env-file

@@ -145,6 +145,7 @@ python -m nuitka ^
     --include-package=qrcode ^
     --include-package=openai ^
     --include-package=bcrypt ^
+    --include-package=cryptography ^
     --nofollow-import-to=test ^
     --nofollow-import-to=tests ^
     --nofollow-import-to=docs ^

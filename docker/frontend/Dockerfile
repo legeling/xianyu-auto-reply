@@ -24,26 +24,23 @@ COPY frontend/ .
 RUN npm run build
 
 # ====== 第二阶段：运行 ======
-# 基础镜像走 docker.io 官方名（由 buildx 的 buildkitd 镜像加速配置拉取，见流水线 BUILDKIT 配置）
-FROM nginx:alpine
+# 使用非 root 的 nginx-unprivileged 镜像（容器内以 uid 101 运行，监听非特权端口 8080）
+FROM nginxinc/nginx-unprivileged:alpine
 
-# 配置国内镜像源
-RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
-
-# 复制nginx配置
+# 复制nginx配置（listen 8080，见 nginx.conf）
 COPY docker/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
 # 复制构建产物（已混淆压缩，不含源码）
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# 暴露端口
-EXPOSE 80
+# 暴露端口（非特权端口，与 nginx.conf 的 listen 保持一致）
+EXPOSE 8080
 
 # 设置时区
 ENV TZ=Asia/Shanghai
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

@@ -46,6 +46,31 @@ echo -e "${CYAN}[信息] Compose: $DC${NC}"
 echo -e "${CYAN}[信息] 项目目录: $WORK_DIR${NC}"
 echo ""
 
+# ========== 密钥工具函数 ==========
+# 生成随机密钥（24位字母数字，安全无特殊字符）
+generate_random_secret() {
+    openssl rand -base64 24 | tr -d '=+/' | cut -c1-24
+}
+
+# 确保 .env 中某个 key 存在且非空；缺失或为空时写入随机值
+# 注意：已存在的值必须保留不变，否则现有数据库密码被改会导致服务无法连接
+ensure_env_secret() {
+    local key="$1"
+    local current
+    current=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d '\r')
+    if [ -z "$current" ]; then
+        local value
+        value=$(generate_random_secret)
+        if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+            # key 存在但值为空，原地替换（sed -i.bak 兼容 GNU/BSD）
+            sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        else
+            echo "${key}=${value}" >> "$ENV_FILE"
+        fi
+        echo -e "${YELLOW}[安全] 已为 ${key} 生成随机密码/密钥，请妥善保管 $ENV_FILE${NC}"
+    fi
+}
+
 # ========== 生成 .env 配置文件 ==========
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}[提示] 首次部署，生成默认配置文件 .env${NC}"
@@ -55,16 +80,21 @@ if [ ! -f "$ENV_FILE" ]; then
 # ==========================================
 
 # MySQL数据库配置（Docker内置，自动创建）
-MYSQL_ROOT_PASSWORD=xianyu@2026
+# 密码留空，部署脚本会自动生成随机值；已生成的值请勿随意修改（否则数据库无法登录）
+MYSQL_ROOT_PASSWORD=
 MYSQL_DATABASE=xianyu_data
 MYSQL_USER=xianyu
-MYSQL_PASSWORD=xianyu@2026
+MYSQL_PASSWORD=
 
 # Redis缓存配置（Docker内置）
-REDIS_PASSWORD=xianyu@2026
+REDIS_PASSWORD=
 REDIS_DB=0
 
-# 说明：JWT 密钥由数据库统一托管（首次启动自动生成并持久化），无需在此配置
+# 说明：backend-web 的 JWT 密钥由数据库统一托管（首次启动自动生成并持久化），无需在此配置
+# JWT_SECRET_KEY：promotion/backend 启动必填的 JWT 签名密钥（本地 promotion 服务使用，脚本自动生成随机值）
+JWT_SECRET_KEY=
+# INTERNAL_API_TOKEN：服务间内部 API 调用凭证（websocket/scheduler 校验 + backend-web/scheduler 调用方带头，脚本自动生成随机值）
+INTERNAL_API_TOKEN=
 
 # 端口配置
 FRONTEND_PORT=9000
@@ -109,9 +139,11 @@ CAPTCHA_DRISSIONPAGE_TIMEOUT=25
 CAPTCHA_DRISSIONPAGE_HEADLESS=true
 
 # 分销卡券上游服务基址（「分销卡券」页面提货 + 个人设置一键创建对接卡密秘钥共用此基址）
+# 上游 https 证书已于 2026-04-24 过期，暂保留 http；证书续期后请改为 https://backend.zhinianboke.com
 CARD_DOCK_BASE_URL=http://backend.zhinianboke.com
 # 个人设置「对接卡密秘钥」一键创建密钥的鉴权 key（基址复用 CARD_DOCK_BASE_URL）
-EXTERNAL_API_KEY=zhinian_bk
+# 必填：无默认值，请向上游申请后填写
+EXTERNAL_API_KEY=
 
 # 前端公网访问地址（用于生成前端页面分享链接，留空则使用默认）
 FRONTEND_PUBLIC_URL=
@@ -131,6 +163,13 @@ ENVEOF
     echo ""
 fi
 
+# 补齐缺失/为空的密钥（已存在的值保持不变；老部署的密码不受影响）
+ensure_env_secret MYSQL_ROOT_PASSWORD
+ensure_env_secret MYSQL_PASSWORD
+ensure_env_secret REDIS_PASSWORD
+ensure_env_secret JWT_SECRET_KEY
+ensure_env_secret INTERNAL_API_TOKEN
+
 # ========== 生成 docker-compose.deploy.yml（远程镜像版） ==========
 echo "[信息] 生成 docker-compose.deploy.yml（远程镜像版）..."
 cat > "$COMPOSE_FILE" << 'COMPOSEEOF'
@@ -147,10 +186,10 @@ services:
     container_name: xianyu-mysql
     restart: unless-stopped
     environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-xianyu@2026}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in .env}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-xianyu_data}
       - MYSQL_USER=${MYSQL_USER:-xianyu}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-xianyu@2026}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in .env}
       - TZ=Asia/Shanghai
     command:
       - --character-set-server=utf8mb4
@@ -163,7 +202,8 @@ services:
     networks:
       - xianyu-network
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-xianyu@2026}"]
+      # 密码通过 MYSQL_PWD 环境变量传入，避免出现在进程命令行参数中（ps 不可见）
+      test: ["CMD-SHELL", "MYSQL_PWD=$${MYSQL_ROOT_PASSWORD} mysqladmin ping -h 127.0.0.1 -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -176,7 +216,7 @@ services:
     restart: unless-stopped
     command: >
       redis-server
-      --requirepass ${REDIS_PASSWORD:-xianyu@2026}
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
@@ -187,7 +227,8 @@ services:
     networks:
       - xianyu-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-xianyu@2026}", "ping"]
+      # 密码通过 REDISCLI_AUTH 环境变量传入，避免出现在进程命令行参数中（ps 不可见）
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$${REDIS_PASSWORD} redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -205,11 +246,11 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:-xianyu}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-xianyu@2026}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in .env}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-xianyu_data}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-xianyu@2026}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       - REDIS_DB=${REDIS_DB:-0}
       - BACKEND_WEB_PORT=8089
       - HOST=0.0.0.0
@@ -219,11 +260,15 @@ services:
       - CORS_ORIGINS=*
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - SCHEDULER_SERVICE_URL=http://scheduler:8091
+      # 服务间内部 API 调用凭证（websocket/scheduler 校验 + backend-web/scheduler 调用方带头）
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set in .env}
       - STATIC_DIR=/app/static
       - BACKUP_DIR=/app/backups
       - BACKEND_WEB_PUBLIC_URL=${BACKEND_WEB_PUBLIC_URL:-}
+      # 上游 https 证书已于 2026-04-24 过期，暂保留 http；证书续期后请改为 https://backend.zhinianboke.com
       - CARD_DOCK_BASE_URL=${CARD_DOCK_BASE_URL:-http://backend.zhinianboke.com}
-      - EXTERNAL_API_KEY=${EXTERNAL_API_KEY:-zhinian_bk}
+      # 必填：向上游申请的鉴权 key，无默认值，请在 .env 中配置
+      - EXTERNAL_API_KEY=${EXTERNAL_API_KEY:-}
       - FRONTEND_PUBLIC_URL=${FRONTEND_PUBLIC_URL:-}
       - AUTO_START_CRAWL_JOBS=${AUTO_START_CRAWL_JOBS:-true}
       - REMOTE_OFFICIAL_BASE_URL=${REMOTE_OFFICIAL_BASE_URL:-https://xy.zhinianboke.com}
@@ -266,11 +311,11 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:-xianyu}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-xianyu@2026}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in .env}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-xianyu_data}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-xianyu@2026}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       - REDIS_DB=${REDIS_DB:-0}
       - WEBSOCKET_PORT=8090
       - HOST=0.0.0.0
@@ -281,6 +326,8 @@ services:
       - CAPTCHA_DRISSIONPAGE_TIMEOUT=${CAPTCHA_DRISSIONPAGE_TIMEOUT:-25}
       - CAPTCHA_DRISSIONPAGE_HEADLESS=${CAPTCHA_DRISSIONPAGE_HEADLESS:-true}
       - BACKEND_WEB_SERVICE_URL=http://backend-web:8089
+      # 服务间内部 API 调用凭证（internal API 校验 + 回调 backend-web 带头）
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set in .env}
       - STATIC_DIR=/app/static
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SQL_ECHO=${SQL_ECHO:-true}
@@ -292,7 +339,8 @@ services:
       - ./xianyu_auto_reply/static:/app/static
       - ./xianyu_auto_reply/browser_data:/app/browser_data
     ports:
-      - "${WEBSOCKET_PORT:-8090}:8090"
+      # 仅绑定回环：WebSocket 服务仅供宿主机/容器间内部调用，不对公网暴露
+      - "127.0.0.1:${WEBSOCKET_PORT:-8090}:8090"
     networks:
       - xianyu-network
     depends_on:
@@ -319,11 +367,11 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:-xianyu}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-xianyu@2026}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in .env}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-xianyu_data}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-xianyu@2026}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       - REDIS_DB=${REDIS_DB:-0}
       - SCHEDULER_PORT=8091
       - HOST=0.0.0.0
@@ -331,6 +379,8 @@ services:
       - RATE_INTERVAL=${RATE_INTERVAL:-20}
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - BACKEND_WEB_SERVICE_URL=http://backend-web:8089
+      # 服务间内部 API 调用凭证（internal API 校验 + 调用 websocket/backend-web 带头）
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set in .env}
       - STATIC_DIR=/app/static
       - BACKUP_DIR=/app/backups
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -341,7 +391,8 @@ services:
       - ./xianyu_auto_reply/static:/app/static:ro
       - ./xianyu_auto_reply/backups:/app/backups
     ports:
-      - "${SCHEDULER_PORT:-8091}:8091"
+      # 仅绑定回环：Scheduler 服务仅供宿主机/容器间内部调用，不对公网暴露
+      - "127.0.0.1:${SCHEDULER_PORT:-8091}:8091"
     networks:
       - xianyu-network
     depends_on:
@@ -368,7 +419,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "${FRONTEND_PORT:-9000}:80"
+      # 前端容器内 nginx 以非 root 运行监听 8080（见 docker/frontend/Dockerfile）
+      - "${FRONTEND_PORT:-9000}:8080"
     networks:
       - xianyu-network
     depends_on:
@@ -474,8 +526,8 @@ echo ""
 echo "服务访问地址："
 echo "  前端:        http://服务器IP:${frontend_port}"
 echo "  Backend-Web: http://服务器IP:${backend_web_port}"
-echo "  WebSocket:   http://服务器IP:${websocket_port}"
-echo "  Scheduler:   http://服务器IP:${scheduler_port}"
+echo "  WebSocket:   http://127.0.0.1:${websocket_port}（仅本机回环，不对外暴露）"
+echo "  Scheduler:   http://127.0.0.1:${scheduler_port}（仅本机回环，不对外暴露）"
 echo ""
 echo "常用命令："
 echo "  查看日志: $DC_CMD logs -f"

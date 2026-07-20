@@ -35,6 +35,14 @@ RUN python -m playwright install --with-deps chromium
 # 创建日志目录
 RUN mkdir -p /app/scheduler/logs
 
+# 创建非 root 运行用户并移交目录所有权（含 Playwright 浏览器目录与可写卷挂载点）
+RUN useradd -m -u 10001 app \
+    && chown -R app:app /app /ms-playwright
+
+# 以非 root 用户运行
+USER app
+ENV HOME=/home/app
+
 # 暴露端口
 EXPOSE 8091
 

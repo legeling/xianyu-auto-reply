@@ -83,11 +83,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"数据库初始化失败: {e}")
     
     # 自检 JWT 密钥：弱/默认值时自动生成强随机密钥并持久化（源码启动兜底）
+    # 安全（M3 修复）：初始化失败时 ensure_jwt_secret_key 会抛出异常，
+    # 此处不再吞掉——以默认弱密钥继续启动会让令牌可被伪造，直接退出（fail-closed）。
     try:
         from app.services.jwt_secret_service import ensure_jwt_secret_key
         await ensure_jwt_secret_key(settings)
     except Exception as e:
-        logger.error(f"JWT 密钥自检失败: {e}")
+        logger.error(f"JWT 密钥自检失败，服务退出（fail-closed）: {e}")
+        sys.exit(1)
     
     # 从数据库加载日志保留天数配置
     from common.utils.logging_utils import apply_db_log_retention, run_db_log_retention_sync

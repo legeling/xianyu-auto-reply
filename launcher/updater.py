@@ -1,23 +1,33 @@
 """
-在线更新模块
+在线更新模块（带签名校验版）
 
 功能：
 1. 从服务器获取最新版本信息（version.json）
 2. 对比本地版本号，判断是否需要更新
-3. 下载新版本压缩包到临时目录
+3. 下载新版本压缩包到临时目录，强制校验 SHA256 与 Ed25519 签名
 4. 生成更新脚本（bat），等待当前进程退出后覆盖并重启
 
 服务器端需要提供：
-- {UPDATE_URL}/version.json  版本信息文件
+- {UPDATE_URL}/version.json  版本信息文件（必须 https）
 - {UPDATE_URL}/app-vX.X.X.zip  完整程序压缩包
 
 version.json 格式示例：
 {
     "version": "1.1.0",
     "description": "1. 修复xxx\\n2. 新增xxx",
-    "filename": "app-v1.1.0.zip"
+    "filename": "app-v1.1.0.zip",
+    "sha256": "压缩包的SHA256十六进制（小写）",
+    "signature": "对 sha256 字符串的 Ed25519 签名（base64url，去填充）"
 }
+
+安全说明：
+- sha256 与 signature 由发布流水线用 launcher/update_signing.py 生成，
+  签名私钥由运营方离线保管（绝不入库），公钥嵌入本文件。
+- 供应链局限：SHA256 只能防传输损坏/防镜像被替换（前提是清单本身可信）；
+  Ed25519 签名才是信任锚。若更新服务器与私钥同时失陷，客户端无法自救。
 """
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -26,10 +36,21 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from launcher.version import CURRENT_VERSION
 
 # 更新服务器地址（从 data/update_config.json 读取）
 _DEFAULT_UPDATE_URL = "https://xy-update.zhinianboke.com"
+
+# 更新清单验签公钥（Ed25519，base64 编码的 32 字节原始公钥）
+# 私钥由运营方离线保管，绝不提交到仓库；轮换密钥需同步替换此处公钥
+_UPDATE_PUBLIC_KEY_B64 = "fgOfn/thujsROVJ5TRLRf+EjsMgRWLpkh41htMgnGO4="
+
+# 是否强制要求清单携带有效 Ed25519 签名
+# True：发布时必须用 launcher/update_signing.py 对清单签名（推荐，防清单被篡改）
+# False：仅兼容过渡期（仅 SHA256 校验，清单被篡改则哈希不可信，不建议长期使用）
+_REQUIRE_MANIFEST_SIGNATURE = True
 
 
 def _get_update_url() -> str:
@@ -37,21 +58,52 @@ def _get_update_url() -> str:
     获取更新服务器地址
 
     优先从 data/update_config.json 读取，否则使用默认值。
+    安全要求：必须是 https（仅允许 localhost/127.0.0.1 用 http 便于本地调试），
+    否则拒绝更新，防止明文 HTTP 被中间人篡改清单与安装包。
     Returns:
         更新服务器基础URL（不含尾部斜杠）
     """
+    url = _DEFAULT_UPDATE_URL
     try:
         from launcher.frozen_detect import get_project_root
         base_dir = get_project_root()
         config_path = base_dir / "data" / "update_config.json"
         if config_path.exists():
             data = json.loads(config_path.read_text(encoding="utf-8"))
-            url = data.get("update_url", "").rstrip("/")
-            if url:
-                return url
+            custom = data.get("update_url", "").rstrip("/")
+            if custom:
+                url = custom
     except Exception:
         pass
-    return _DEFAULT_UPDATE_URL
+
+    # 强制 https：非 https 地址直接回退默认 https 地址（防止配置文件被改成 http）
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme == "http" and host in ("localhost", "127.0.0.1"):
+            # 本地调试放行 http
+            return url
+        return _DEFAULT_UPDATE_URL
+    return url
+
+
+def _verify_manifest_signature(sha256_hex: str, signature_b64url: str) -> bool:
+    """
+    用嵌入公钥验证清单签名（签名载荷为 sha256 十六进制字符串）
+
+    Returns:
+        True 签名有效，False 签名无效或格式错误
+    """
+    try:
+        pad = "=" * (-len(signature_b64url) % 4)
+        sig = base64.urlsafe_b64decode(signature_b64url + pad)
+        pub = Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(_UPDATE_PUBLIC_KEY_B64))
+        pub.verify(sig, sha256_hex.encode("utf-8"))
+        return True
+    except Exception:
+        return False
 
 
 def _compare_versions(local: str, remote: str) -> bool:
@@ -85,7 +137,7 @@ def check_update() -> dict:
         - remote_version: str 远程版本号（无更新时为空）
         - description: str 更新说明
         - filename: str 下载文件名
-        - md5: str 文件MD5校验值
+        - sha256: str 文件SHA256校验值（十六进制小写）
         - error: str 错误信息（正常时为空）
     """
     result = {
@@ -94,6 +146,7 @@ def check_update() -> dict:
         "remote_version": "",
         "description": "",
         "filename": "",
+        "sha256": "",
         "error": "",
     }
 
@@ -122,19 +175,54 @@ def check_update() -> dict:
     result["filename"] = data.get("filename", "")
 
     if _compare_versions(CURRENT_VERSION, remote_ver):
+        # 有新版本时强制校验清单完整性字段
+        sha256_hex = str(data.get("sha256", "")).strip().lower()
+        if (len(sha256_hex) != 64
+                or any(c not in "0123456789abcdef" for c in sha256_hex)):
+            result["error"] = ("更新清单缺少有效的 sha256 字段，已中止更新"
+                               "（发布流水线需使用 launcher/update_signing.py 生成清单）")
+            return result
+
+        signature = str(data.get("signature", "")).strip()
+        if _REQUIRE_MANIFEST_SIGNATURE:
+            if not signature or not _verify_manifest_signature(sha256_hex, signature):
+                result["error"] = ("更新清单签名校验失败，已中止更新"
+                                   "（可能遭遇篡改，请勿继续）")
+                return result
+        elif signature and not _verify_manifest_signature(sha256_hex, signature):
+            # 过渡期：携带签名但验签失败同样拒绝（宁可误杀不可放行）
+            result["error"] = "更新清单签名校验失败，已中止更新（可能遭遇篡改，请勿继续）"
+            return result
+
+        result["sha256"] = sha256_hex
         result["has_update"] = True
 
     return result
 
 
+def _sha256_file(file_path: Path) -> str:
+    """计算文件的 SHA256（分块读取，避免大包占内存）"""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def download_update(filename: str,
-                    progress_callback=None) -> dict:
+                    progress_callback=None,
+                    expected_sha256: str = "") -> dict:
     """
-    下载新版本压缩包到临时目录
+    下载新版本压缩包到临时目录，并强制校验 SHA256
 
     Args:
         filename: 下载文件名（如 app-v1.1.0.zip）
         progress_callback: 进度回调函数，参数为(已下载字节, 总字节)
+        expected_sha256: 清单中给出的 SHA256（十六进制小写），必填；
+                         为空或校验不匹配则中止更新并删除已下载文件
     Returns:
         字典包含:
         - success: bool 是否下载成功
@@ -142,6 +230,17 @@ def download_update(filename: str,
         - error: str 错误信息
     """
     result = {"success": False, "file_path": "", "error": ""}
+
+    # 强制要求携带预期哈希，防止调用方绕过校验
+    expected_sha256 = (expected_sha256 or "").strip().lower()
+    if len(expected_sha256) != 64:
+        result["error"] = "缺少预期的 SHA256 校验值，已中止更新"
+        return result
+
+    # 文件名安全校验：仅允许纯文件名，防止路径穿越写到临时目录之外
+    if not filename or Path(filename).name != filename:
+        result["error"] = "非法的下载文件名，已中止更新"
+        return result
 
     update_url = _get_update_url()
     download_url = f"{update_url}/{filename}"
@@ -169,6 +268,17 @@ def download_update(filename: str,
                         progress_callback(downloaded, total)
     except Exception as e:
         result["error"] = f"下载失败: {str(e)}"
+        return result
+
+    # 强制 SHA256 校验：不匹配则删除文件并告警，绝不进入安装流程
+    actual_sha256 = _sha256_file(local_path)
+    if actual_sha256 != expected_sha256:
+        try:
+            local_path.unlink()
+        except OSError:
+            pass
+        result["error"] = ("安装包 SHA256 校验失败，已中止更新并删除安装包"
+                           "（可能遭遇篡改或下载损坏，请勿继续）")
         return result
 
     result["success"] = True

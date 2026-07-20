@@ -1,11 +1,19 @@
 """
-激活码生成工具（交互式）
+激活码生成工具（交互式，Ed25519 签名版）
 
 用法：
+    # 方式一：环境变量提供私钥（base64 编码的 32 字节 Ed25519 私钥种子）
+    set XIANYU_LICENSE_PRIVATE_KEY=<base64私钥>
     python launcher/keygen.py
 
-按提示依次输入机器码、时间维度、数量，即可生成激活码或续期码。
-支持循环生成，输入 q 退出。
+    # 方式二：命令行指定私钥文件（文件内容为 base64 私钥，单行）
+    python launcher/keygen.py --private-key-file <私钥文件路径>
+
+安全说明：
+- 私钥由运营方离线保管，绝不提交到仓库，也不要放在项目目录内。
+- 按提示依次输入机器码、时间维度、数量，即可生成激活码或续期码。
+- 生成的激活码/续期码中签名部分大小写敏感，请完整复制。
+- 支持循环生成，输入 q 退出。
 """
 import os
 import sys
@@ -25,6 +33,46 @@ from launcher.activation import (
 
 # 维度中文映射
 _UNIT_NAMES = {"h": "小时", "d": "天", "m": "月", "y": "年"}
+
+# 私钥环境变量名
+_PRIVATE_KEY_ENV = "XIANYU_LICENSE_PRIVATE_KEY"
+
+
+def _load_private_key() -> str:
+    """
+    从命令行参数或环境变量读取 Ed25519 私钥（base64）
+
+    Returns:
+        base64 私钥字符串；未提供时打印说明并退出
+    """
+    # 命令行参数：--private-key-file <路径>
+    if "--private-key-file" in sys.argv:
+        idx = sys.argv.index("--private-key-file")
+        if idx + 1 >= len(sys.argv):
+            print("错误: --private-key-file 缺少文件路径参数")
+            sys.exit(1)
+        key_path = sys.argv[idx + 1]
+        try:
+            with open(key_path, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+        except OSError as e:
+            print(f"错误: 无法读取私钥文件 {key_path}: {e}")
+            sys.exit(1)
+        if key:
+            return key
+        print(f"错误: 私钥文件 {key_path} 内容为空")
+        sys.exit(1)
+
+    # 环境变量
+    key = os.environ.get(_PRIVATE_KEY_ENV, "").strip()
+    if key:
+        return key
+
+    print("错误: 未提供签名私钥。请通过以下任一方式提供（base64 编码的 Ed25519 私钥）：")
+    print(f"  1. 环境变量 { _PRIVATE_KEY_ENV }")
+    print("  2. 命令行参数 --private-key-file <私钥文件路径>")
+    print("注意: 私钥由运营方离线保管，请勿提交到仓库或放在项目目录内")
+    sys.exit(1)
 
 
 def _input_machine_id():
@@ -75,6 +123,9 @@ def main():
     print("=" * 50)
     print()
 
+    # 启动时读取一次私钥（签名必需）
+    private_key = _load_private_key()
+
     while True:
         # 选择生成类型
         print("请选择生成类型:")
@@ -106,7 +157,7 @@ def main():
         if code_type == "1":
             # 生成激活码
             expire_ts = calc_expire_time(unit, amount)
-            code = generate_activation_code(machine_id, expire_ts)
+            code = generate_activation_code(machine_id, expire_ts, private_key)
             expire_str = format_expire_time(expire_ts)
             print()
             print("=" * 50)
@@ -115,17 +166,19 @@ def main():
             print(f"  有效期:   {amount}{_UNIT_NAMES[unit]}")
             print(f"  到期时间: {expire_str}")
             print(f"  激活码:   {code}")
+            print("  （签名部分大小写敏感，请完整复制）")
             print("=" * 50)
         else:
             # 生成续期码
             duration = calc_duration_seconds(unit, amount)
-            code = generate_renew_code(machine_id, duration)
+            code = generate_renew_code(machine_id, duration, private_key)
             print()
             print("=" * 50)
             print(f"  类型:     续期码")
             print(f"  机器码:   {machine_id}")
             print(f"  续期时长: {amount}{_UNIT_NAMES[unit]}")
             print(f"  续期码:   {code}")
+            print("  （签名部分大小写敏感，请完整复制）")
             print("=" * 50)
         print()
 

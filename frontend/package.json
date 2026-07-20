@@ -10,20 +10,22 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "axios": "^1.6.5",
+    "axios": "^1.8.2",
     "clsx": "^2.1.0",
+    "dompurify": "^3.2.4",
     "framer-motion": "^10.18.0",
     "lucide-react": "^0.309.0",
     "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-is": "^19.2.6",
+    "react-is": "^18.3.1",
     "react-router-dom": "^6.21.1",
     "recharts": "^3.8.0",
     "tailwind-merge": "^2.2.0",
     "zustand": "^4.4.7"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^20.10.6",
     "@types/react": "^18.2.46",
     "@types/react-dom": "^18.2.18",
@@ -37,6 +39,6 @@
     "postcss": "^8.4.33",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.3.3",
-    "vite": "^5.0.10"
+    "vite": "^5.4.11"
   }
 }

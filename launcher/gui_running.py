@@ -491,6 +491,7 @@ def _start_download(app, update_info):
         result = download_update(
             update_info["filename"],
             progress_callback=_progress_cb,
+            expected_sha256=update_info.get("sha256", ""),
         )
         app.root.after(0, lambda: _on_download_done(app, dlg, result))
 
