@@ -15,19 +15,17 @@ from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from app.core.config import get_settings
 from common.db.session import async_session_maker
 from common.models.xy_account import XYAccount
 from common.services.captcha.concurrency import run_browser_task
 from common.services.cookie_renew_browser_service import cookie_renew_browser_service
-from common.utils.internal_auth import make_internal_token_dependency
 from app.services.xianyu.cookies_refresh_service import cookies_refresh_service
+from app.api.deps import require_internal_auth
 
-# 安全：内部接口统一鉴权（X-Internal-Token 共享密钥，fail-closed，详见 common/utils/internal_auth.py）
 router = APIRouter(
     prefix="/internal",
     tags=["internal"],
-    dependencies=[Depends(make_internal_token_dependency(get_settings))],
+    dependencies=[Depends(require_internal_auth)],
 )
 
 

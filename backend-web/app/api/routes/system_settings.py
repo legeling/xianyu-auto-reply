@@ -12,22 +12,40 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from app.core.config import get_settings
 from app.core.http_client import get_http_client
 from common.models.user import User, UserRole
 from common.schemas.common import ApiResponse
-from common.schemas.system_setting import SystemSettingUpdate
+from common.schemas.system_setting import (
+    RemotePasswordLoginTestRequest,
+    RemoteTokenTestRequest,
+    SystemSettingUpdate,
+)
 from app.services.system_setting_service import (
-    PROTECTED_KEYS,
-    SENSITIVE_KEYS,
-    SENSITIVE_MASK,
-    SystemSettingService,
+    PROTECTED_KEYS, SENSITIVE_KEYS, SENSITIVE_MASK, SystemSettingService,
+)
+from common.services.remote_token_api import (
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    TOKEN_REMOTE_URL_SETTING_KEY,
+    is_remote_token_empty_cookies_message,
+    request_remote_xianyu_token,
+    validate_remote_token_settings,
+)
+from common.services.remote_password_login_api import (
+    test_remote_password_login_interface,
+    validate_remote_password_login_settings,
+)
+from common.services.remote_token_risk_log_service import record_remote_token_risk_log
+from common.services.token_api_mode import (
+    TOKEN_API_MODE_REMOTE,
+    TOKEN_API_MODE_SETTING_KEY,
+    TOKEN_API_MODES,
 )
 from common.utils.logging_utils import update_log_retention
 from common.utils.browser_utils import is_frozen
-from common.utils.internal_auth import build_internal_headers
 
 router = APIRouter(tags=["system_settings"])
 
@@ -35,8 +53,22 @@ router = APIRouter(tags=["system_settings"])
 LOG_RETENTION_KEY = "log.retention_days"
 PASSWORD_LOGIN_MODE_KEY = "password_login.mode"
 PASSWORD_LOGIN_MODES = {"protocol", "browser"}
+# 协议登录远程接口配置键：选择协议登录时需填写远程URL与秘钥
+PASSWORD_LOGIN_PROTOCOL_MODE = "protocol"
+PASSWORD_LOGIN_REMOTE_URL_KEY = "password_login.remote_url"
+PASSWORD_LOGIN_REMOTE_SECRET_KEY_KEY = "password_login.remote_secret_key"
+PASSWORD_LOGIN_REMOTE_SETTING_KEYS = {
+    PASSWORD_LOGIN_MODE_KEY,
+    PASSWORD_LOGIN_REMOTE_URL_KEY,
+    PASSWORD_LOGIN_REMOTE_SECRET_KEY_KEY,
+}
 CAPTCHA_SLIDER_MODE_KEY = "captcha.slider_mode"
 CAPTCHA_SLIDER_MODES = {"browser", "real_mouse"}
+TOKEN_REMOTE_SETTING_KEYS = {
+    TOKEN_API_MODE_SETTING_KEY,
+    TOKEN_REMOTE_URL_SETTING_KEY,
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+}
 
 NON_ADMIN_ALLOWED_KEYS = {
     "disclaimer.title",
@@ -112,6 +144,67 @@ async def _validate_proxy_setting(
     return None
 
 
+async def _validate_remote_token_setting(
+    key: str,
+    new_value: str,
+    service: SystemSettingService,
+) -> str | None:
+    """Token远程接口跨键校验，防止绕过前端保存非法配置。"""
+    if key not in TOKEN_REMOTE_SETTING_KEYS:
+        return None
+
+    current_settings = await service.list_settings(include_sensitive=True)
+    target_mode = str(current_settings.get(TOKEN_API_MODE_SETTING_KEY) or "").strip().lower()
+    target_url = str(current_settings.get(TOKEN_REMOTE_URL_SETTING_KEY) or "").strip()
+    target_secret_key = str(
+        current_settings.get(TOKEN_REMOTE_SECRET_KEY_SETTING_KEY) or ""
+    ).strip()
+
+    if key == TOKEN_API_MODE_SETTING_KEY:
+        target_mode = str(new_value or "").strip().lower()
+    elif key == TOKEN_REMOTE_URL_SETTING_KEY:
+        target_url = str(new_value or "").strip()
+    elif key == TOKEN_REMOTE_SECRET_KEY_SETTING_KEY:
+        target_secret_key = str(new_value or "").strip()
+
+    if target_mode != TOKEN_API_MODE_REMOTE:
+        return None
+
+    return validate_remote_token_settings(target_url, target_secret_key)
+
+
+async def _validate_password_login_remote_setting(
+    key: str,
+    new_value: str,
+    service: SystemSettingService,
+) -> str | None:
+    """协议登录远程接口跨键校验，防止绕过前端保存非法配置。
+
+    选择协议登录（password_login.mode=protocol）时，远程URL与秘钥必须已填写且格式合法。
+    """
+    if key not in PASSWORD_LOGIN_REMOTE_SETTING_KEYS:
+        return None
+
+    current_settings = await service.list_settings(include_sensitive=True)
+    target_mode = str(current_settings.get(PASSWORD_LOGIN_MODE_KEY) or "").strip().lower()
+    target_url = str(current_settings.get(PASSWORD_LOGIN_REMOTE_URL_KEY) or "").strip()
+    target_secret_key = str(
+        current_settings.get(PASSWORD_LOGIN_REMOTE_SECRET_KEY_KEY) or ""
+    ).strip()
+
+    if key == PASSWORD_LOGIN_MODE_KEY:
+        target_mode = str(new_value or "").strip().lower()
+    elif key == PASSWORD_LOGIN_REMOTE_URL_KEY:
+        target_url = str(new_value or "").strip()
+    elif key == PASSWORD_LOGIN_REMOTE_SECRET_KEY_KEY:
+        target_secret_key = str(new_value or "").strip()
+
+    if target_mode != PASSWORD_LOGIN_PROTOCOL_MODE:
+        return None
+
+    return validate_remote_password_login_settings(target_url, target_secret_key)
+
+
 async def _notify_log_retention_service(
     service_name: str,
     service_url: str,
@@ -129,7 +222,6 @@ async def _notify_log_retention_service(
         response = await get_http_client().post(
             f"{service_url.rstrip('/')}/internal/logs/retention",
             json={"retention_days": retention_days},
-            headers=build_internal_headers(get_settings()),
         )
         success = bool(response.get("success"))
         default_msg = f"{service_name}服务刷新成功" if success else f"{service_name}服务刷新失败"
@@ -236,6 +328,13 @@ async def update_system_setting(
                 success=False,
                 message="滑块滑动方式无效，请选择浏览器自动滑动或真实鼠标滑动",
             )
+    if key == TOKEN_API_MODE_SETTING_KEY:
+        setting_value = str(payload.value or "").strip().lower()
+        if setting_value not in TOKEN_API_MODES:
+            return ApiResponse(
+                success=False,
+                message="Token获取方式无效，请选择网页接口或远程接口",
+            )
 
     retention_days: int | None = None
     if key == LOG_RETENTION_KEY:
@@ -247,6 +346,16 @@ async def update_system_setting(
     proxy_error = await _validate_proxy_setting(key, setting_value, service)
     if proxy_error:
         return ApiResponse(success=False, message=proxy_error)
+
+    remote_token_error = await _validate_remote_token_setting(key, setting_value, service)
+    if remote_token_error:
+        return ApiResponse(success=False, message=remote_token_error)
+
+    password_login_remote_error = await _validate_password_login_remote_setting(
+        key, setting_value, service
+    )
+    if password_login_remote_error:
+        return ApiResponse(success=False, message=password_login_remote_error)
 
     await service.set_setting(key, setting_value, payload.description)
 
@@ -291,3 +400,124 @@ async def test_email_send(
     
     success, message = await send_test_email(email)
     return ApiResponse(success=success, message=message)
+
+
+@router.post("/test-token-remote", response_model=ApiResponse)
+async def test_token_remote_interface(
+    payload: RemoteTokenTestRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """测试远程 Token 接口连通性与返回格式。"""
+    remote_secret_key = await SystemSettingService(db).resolve_sensitive_value(
+        TOKEN_REMOTE_SECRET_KEY_SETTING_KEY, payload.remote_secret_key,
+    )
+    error_message = validate_remote_token_settings(
+        payload.remote_url,
+        remote_secret_key,
+    )
+    if error_message:
+        return ApiResponse(success=False, message=error_message)
+
+    try:
+        result = await request_remote_xianyu_token(
+            payload.remote_url,
+            remote_secret_key,
+            timeout_seconds=30,
+        )
+    except Exception as exc:
+        logger.error(f"测试远程Token接口异常: {type(exc).__name__}: {exc}")
+        await record_remote_token_risk_log(
+            account_identifier="系统设置远程接口测试",
+            success=False,
+            message=f"{type(exc).__name__}: {exc}",
+            owner_id=current_user.id,
+            call_user=current_user.username,
+            event_description="系统设置测试远程Token接口",
+        )
+        return ApiResponse(
+            success=False,
+            message=f"远程接口测试失败：{type(exc).__name__}: {exc}",
+        )
+
+    # 连通性测试传空 Cookie，远程接口仅抱怨 Cookie 长度时说明地址与秘钥已通过校验，视为测试通过
+    connectivity_only = not result.success and is_remote_token_empty_cookies_message(result.message)
+    connectivity_passed = result.success or connectivity_only
+
+    # 风控日志按「是否真的取到 Token」记录，避免出现「获取Token成功；说明：参数cookies长度不足」这类矛盾文案；
+    # 仅连通性通过的场景在事件描述中说明原因
+    await record_remote_token_risk_log(
+        account_identifier="系统设置远程接口测试",
+        success=result.success,
+        message=result.message,
+        api_mode=result.api_mode,
+        status_code=result.status_code,
+        duration_seconds=result.duration_seconds,
+        owner_id=current_user.id,
+        call_user=current_user.username,
+        event_description=(
+            "系统设置测试远程Token接口：地址与秘钥校验通过，因测试只传空Cookie未取Token"
+            if connectivity_only
+            else "系统设置测试远程Token接口"
+        ),
+    )
+
+    if not connectivity_passed:
+        return ApiResponse(
+            success=False,
+            message=f"远程接口返回：{result.message or '未返回错误说明'}",
+        )
+
+    if connectivity_only:
+        return ApiResponse(
+            success=True,
+            message="远程接口连通性测试成功，请点击保存",
+            data={
+                "token": "",
+                "device_id": "",
+                "api_mode": result.api_mode,
+            },
+        )
+
+    return ApiResponse(
+        success=True,
+        message="远程接口测试成功",
+        data={
+            "token": result.token,
+            "device_id": result.device_id,
+            "api_mode": result.api_mode,
+        },
+    )
+
+
+@router.post("/test-password-login-remote", response_model=ApiResponse)
+async def test_password_login_remote_interface(
+    payload: RemotePasswordLoginTestRequest,
+    current_user: User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> ApiResponse:
+    """测试协议登录远程接口（阿里滑块获取 x5sec）连通性与秘钥有效性。"""
+    remote_secret_key = await SystemSettingService(db).resolve_sensitive_value(
+        PASSWORD_LOGIN_REMOTE_SECRET_KEY_KEY, payload.remote_secret_key,
+    )
+    error_message = validate_remote_password_login_settings(
+        payload.remote_url,
+        remote_secret_key,
+    )
+    if error_message:
+        return ApiResponse(success=False, message=error_message)
+
+    try:
+        result = await test_remote_password_login_interface(
+            payload.remote_url,
+            remote_secret_key,
+            timeout_seconds=15,
+        )
+    except Exception as exc:
+        logger.error(f"测试协议登录远程接口异常: {type(exc).__name__}: {exc}")
+        return ApiResponse(
+            success=False,
+            message=f"远程接口测试失败：{type(exc).__name__}: {exc}",
+        )
+
+    return ApiResponse(success=result.success, message=result.message)

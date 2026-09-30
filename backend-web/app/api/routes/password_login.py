@@ -28,7 +28,7 @@ from app.services.password_login.manager import SESSION_PREFIX
 from common.models.system_setting import SystemSetting
 from common.models.user import User
 from common.services.account_limit_service import AccountLimitExceededError, AccountLimitService
-from common.utils.internal_auth import build_internal_headers
+from common.utils.internal_auth import build_internal_auth_headers
 
 router = APIRouter(prefix="/password-login", tags=["密码登录"])
 
@@ -127,7 +127,7 @@ async def _proxy_ws_login(request: PasswordLoginRequest, user_id: int) -> dict:
                     "show_browser": True,  # 浏览器方式强制有头
                     "user_id": user_id,
                 },
-                headers=build_internal_headers(settings),
+                headers=build_internal_auth_headers(settings.internal_api_token),
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -160,7 +160,7 @@ async def check_login_status(
             # 内部接口鉴权头（X-Internal-Token 共享密钥）
             resp = await client.get(
                 f"{settings.websocket_service_url}/password-login/check/{session_id}",
-                headers=build_internal_headers(settings),
+                headers=build_internal_auth_headers(settings.internal_api_token),
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -187,7 +187,7 @@ async def cancel_login(
             # 内部接口鉴权头（X-Internal-Token 共享密钥）
             resp = await client.delete(
                 f"{settings.websocket_service_url}/password-login/cancel/{session_id}",
-                headers=build_internal_headers(settings),
+                headers=build_internal_auth_headers(settings.internal_api_token),
             )
             if resp.status_code == 200:
                 return resp.json()

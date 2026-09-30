@@ -4,9 +4,10 @@ import { motion } from 'framer-motion'
 import { MessageSquare, Mail, KeyRound, Lock, Eye, EyeOff, ArrowLeft } from 'lucide-react'
 import { AuthNavbar } from '@/components/common/AuthNavbar'
 import { getDefaultLoginBrandingSettings } from '@/api/settings'
-import { sendResetPasswordCode, resetPassword, getLoginBrandingSettings } from '@/api/auth'
+import { sendResetPasswordCode, resetPassword, getLoginBrandingSettings, getLoginCaptchaStatus } from '@/api/auth'
 import { useUIStore } from '@/store/uiStore'
 import { ButtonLoading } from '@/components/common/Loading'
+import { GeetestCaptcha, type GeetestResult } from '@/components/common/GeetestCaptcha'
 
 export function ForgotPassword() {
   const navigate = useNavigate()
@@ -26,10 +27,24 @@ export function ForgotPassword() {
   // Countdown
   const [countdown, setCountdown] = useState(0)
 
+  // 极验滑动验证码状态（参照登录页）
+  const [loginCaptchaEnabled, setLoginCaptchaEnabled] = useState<boolean | null>(null)
+  const [geetestResult, setGeetestResult] = useState<GeetestResult | null>(null)
+  const [geetestKey, setGeetestKey] = useState(0)
+
+  // 重置滑动验证码（每次发送后强制重新验证）
+  const resetGeetest = () => {
+    setGeetestResult(null)
+    setGeetestKey((k) => k + 1)
+  }
+
   // Load branding settings
   useEffect(() => {
     getLoginBrandingSettings()
       .then((result) => setLoginBranding(result))
+      .catch(() => {})
+    getLoginCaptchaStatus()
+      .then((result) => setLoginCaptchaEnabled(result.enabled))
       .catch(() => {})
   }, [])
 
@@ -44,9 +59,20 @@ export function ForgotPassword() {
   const handleSendCode = async () => {
     if (!email || countdown > 0) return
 
+    // 开启滑动验证时，发送前必须完成极验验证（参照登录页）
+    if (loginCaptchaEnabled === true && !geetestResult) {
+      addToast({ type: 'error', message: '请完成滑动验证' })
+      return
+    }
+
     setLoading(true)
     try {
-      const result = await sendResetPasswordCode(email)
+      const result = await sendResetPasswordCode(
+        email,
+        geetestResult
+          ? { challenge: geetestResult.challenge, validate: geetestResult.validate, seccode: geetestResult.seccode }
+          : undefined
+      )
       if (result.success) {
         setCountdown(60)
         addToast({ type: 'success', message: '验证码已发送到您的邮箱' })
@@ -58,6 +84,8 @@ export function ForgotPassword() {
       addToast({ type: 'error', message: '发送验证码失败，请检查网络连接' })
     } finally {
       setLoading(false)
+      // 极验 challenge 一次性，无论成败都重置，重新发送需再次滑动验证
+      resetGeetest()
     }
   }
 
@@ -206,10 +234,23 @@ export function ForgotPassword() {
                     </div>
                   </div>
 
+                  {/* 滑动验证（参照登录页，开启时展示） */}
+                  {loginCaptchaEnabled === true && (
+                    <div className="input-group">
+                      <label className="input-label">滑动验证</label>
+                      <GeetestCaptcha
+                        key={geetestKey}
+                        onSuccess={(result) => setGeetestResult(result)}
+                        onError={(err) => addToast({ type: 'error', message: err })}
+                        disabled={loading}
+                      />
+                    </div>
+                  )}
+
                   <button
                     type="button"
                     onClick={handleSendCode}
-                    disabled={loading || !email}
+                    disabled={loading || !email || (loginCaptchaEnabled === true && !geetestResult)}
                     className="w-full btn-ios-primary"
                   >
                     {loading ? <ButtonLoading /> : '发送验证码'}
@@ -250,13 +291,26 @@ export function ForgotPassword() {
                       <button
                         type="button"
                         onClick={handleSendCode}
-                        disabled={countdown > 0 || loading}
+                        disabled={countdown > 0 || loading || (loginCaptchaEnabled === true && !geetestResult)}
                         className="btn-ios-secondary whitespace-nowrap"
                       >
                         {countdown > 0 ? `${countdown}s` : '重新发送'}
                       </button>
                     </div>
                   </div>
+
+                  {/* 滑动验证：仅在可重新发送（倒计时结束）且开启验证时展示 */}
+                  {loginCaptchaEnabled === true && countdown === 0 && (
+                    <div className="input-group">
+                      <label className="input-label">滑动验证（重新发送需要）</label>
+                      <GeetestCaptcha
+                        key={geetestKey}
+                        onSuccess={(result) => setGeetestResult(result)}
+                        onError={(err) => addToast({ type: 'error', message: err })}
+                        disabled={loading}
+                      />
+                    </div>
+                  )}
 
                   {/* New password */}
                   <div className="input-group">

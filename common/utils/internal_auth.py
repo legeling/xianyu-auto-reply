@@ -1,93 +1,102 @@
 """
-服务间内部接口共享密钥鉴权（X-Internal-Token）
+服务间内部 API 鉴权工具。
 
-安全意图：
-- websocket / scheduler 的 /internal/* 与 /password-login 等内部接口此前完全无鉴权，
-  任何能访问服务端口的人都可以直接调用（启动/停止账号、订单发货、过滑块等高危操作）。
-- 采用共享密钥 + hmac.compare_digest 常量时间比较，防止时序侧信道。
-- fail-closed：服务端未配置 INTERNAL_API_TOKEN 时拒绝所有内部请求（503 并告警），
-  避免"忘了配置 = 内部接口裸奔"；配置后令牌缺失/不匹配返回 401。
-
-使用方式：
-- 服务端（被调用方）：在内部路由上挂载 make_internal_token_dependency(get_settings) 依赖；
-- 调用方：请求时携带 build_internal_headers(settings) 生成的请求头。
-  所有服务共用 common.core.config.BaseConfig 中的 internal_api_token 字段
-  （环境变量 INTERNAL_API_TOKEN），docker 部署时对各服务注入同一个值即可。
+功能：
+1. 统一定义内部 API 请求头名称。
+2. 为 backend-web、scheduler 和其他内部调用方生成鉴权请求头。
+3. 使用常量时间比较，避免令牌比较引入时序侧信道。
 """
 from __future__ import annotations
 
-import hmac
-from typing import Callable
+from hmac import compare_digest
+from typing import Mapping
+from urllib.parse import urlparse
 
-from fastapi import HTTPException, Request, status
-from loguru import logger
+from fastapi import HTTPException, status
 
-# 内部接口鉴权请求头名称
-INTERNAL_TOKEN_HEADER = "X-Internal-Token"
-
-
-def get_internal_api_token(settings) -> str:
-    """从配置实例读取内部接口共享密钥（去除首尾空白）。"""
-    return (getattr(settings, "internal_api_token", None) or "").strip()
+INTERNAL_AUTH_HEADER = "X-Internal-Token"
+# 已有部署脚本生成 24 位随机令牌；自动初始化和校验共用此合同。
+MIN_INTERNAL_TOKEN_LENGTH = 24
 
 
-def build_internal_headers(settings=None) -> dict[str, str]:
-    """构造调用内部接口所需的鉴权请求头。
-
-    Args:
-        settings: 调用方服务的配置实例；不传时使用 common 基础配置
-            （所有服务读取同一个 INTERNAL_API_TOKEN 环境变量，取值一致）。
-
-    Returns:
-        包含 X-Internal-Token 的请求头字典；未配置时返回空字典并告警
-        （对端 fail-closed 会拒绝该请求，此处告警便于定位配置缺失）。
-    """
-    if settings is None:
-        from common.core.config import get_settings
-
-        settings = get_settings()
-    token = get_internal_api_token(settings)
-    if not token:
-        logger.warning(
-            "INTERNAL_API_TOKEN 未配置，本次内部接口调用将被对端拒绝（fail-closed），"
-            "请为所有服务配置相同的 INTERNAL_API_TOKEN"
+def build_internal_auth_headers(token: str | None) -> dict[str, str]:
+    """根据服务间令牌生成请求头；未配置令牌时抛出明确异常。"""
+    normalized = (token or "").strip()
+    if len(normalized) < MIN_INTERNAL_TOKEN_LENGTH:
+        raise RuntimeError(
+            f"INTERNAL_API_TOKEN 未配置或长度不足{MIN_INTERNAL_TOKEN_LENGTH}位，无法调用内部 API"
         )
-        return {}
-    return {INTERNAL_TOKEN_HEADER: token}
+    return {INTERNAL_AUTH_HEADER: normalized}
 
 
-def make_internal_token_dependency(settings_getter: Callable[[], object]):
-    """生成内部接口鉴权依赖（注入被调用方自己的配置实例）。
+def is_valid_internal_token(provided: str | None, expected: str | None) -> bool:
+    """校验请求令牌是否与服务配置一致。"""
+    configured = (expected or "").strip()
+    presented = (provided or "").strip()
+    return bool(
+        len(configured) >= MIN_INTERNAL_TOKEN_LENGTH
+        and len(presented) >= MIN_INTERNAL_TOKEN_LENGTH
+        and compare_digest(presented, configured)
+    )
 
-    Args:
-        settings_getter: 返回配置实例的可调用对象（通常为各服务的 get_settings）。
 
-    Returns:
-        FastAPI 依赖：校验 X-Internal-Token 请求头。
+def require_valid_internal_token(provided: str | None, expected: str | None) -> None:
+    """校验服务间令牌；失败时抛出统一的 401 业务异常。"""
+    if len((expected or "").strip()) < MIN_INTERNAL_TOKEN_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="内部接口未配置有效访问令牌，服务不可用",
+        )
+    if not is_valid_internal_token(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="内部 API 鉴权失败",
+            headers={"WWW-Authenticate": INTERNAL_AUTH_HEADER},
+        )
+
+
+def merge_internal_auth_headers(
+    headers: Mapping[str, str] | None,
+    token: str | None,
+) -> dict[str, str]:
+    """在保留调用方请求头的基础上加入内部 API 鉴权头。"""
+    # HTTP 头名称大小写不敏感：先移除调用方可能传入的旧值，避免
+    # ``x-internal-token`` 与规范大小写的头同时存在而由客户端随机选值。
+    merged = {
+        key: value
+        for key, value in (headers or {}).items()
+        if key.lower() != INTERNAL_AUTH_HEADER.lower()
+    }
+    merged.update(build_internal_auth_headers(token))
+    return merged
+
+
+def is_internal_api_path(path: str | None) -> bool:
+    """判断 URL 路径是否严格属于 /internal API 命名空间。"""
+    normalized = (path or "").split("?", 1)[0].rstrip("/")
+    return normalized == "/internal" or normalized.startswith("/internal/")
+
+
+def is_internal_api_url(
+    url: str | None,
+    allowed_base_urls: tuple[str, ...] = (),
+) -> bool:
+    """判断 URL 是否指向受信任服务的严格 /internal API 路径。
+
+    绝对 URL 必须与调用方配置的内部服务 origin 匹配；相对 URL 仅按路径判断。
     """
-
-    async def _verify_internal_token(request: Request) -> None:
-        expected = get_internal_api_token(settings_getter())
-        if not expected:
-            # fail-closed：宁可内部接口全部不可用，也不允许无鉴权暴露
-            logger.error(
-                f"内部接口 {request.url.path} 被拒绝：服务端未配置 INTERNAL_API_TOKEN（fail-closed）"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="内部接口未配置访问令牌，服务不可用",
-            )
-        provided = (request.headers.get(INTERNAL_TOKEN_HEADER) or "").strip()
-        # 常量时间比较，防止时序侧信道逐字节探测密钥
-        if not provided or not hmac.compare_digest(provided, expected):
-            client_host = request.client.host if request.client else "-"
-            logger.warning(
-                f"内部接口 {request.url.path} 鉴权失败：X-Internal-Token 缺失或不匹配，"
-                f"client={client_host}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="内部接口令牌无效",
-            )
-
-    return _verify_internal_token
+    parsed = urlparse(url or "")
+    if not is_internal_api_path(parsed.path):
+        return False
+    if not parsed.netloc:
+        return True
+    if not allowed_base_urls:
+        return False
+    target_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    for base_url in allowed_base_urls:
+        base = urlparse((base_url or "").strip())
+        if base.scheme and base.netloc:
+            base_origin = f"{base.scheme.lower()}://{base.netloc.lower()}"
+            if target_origin == base_origin:
+                return True
+    return False

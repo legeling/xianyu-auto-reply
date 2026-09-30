@@ -37,7 +37,6 @@ from app.services.scheduled_batch_log_service import ScheduledBatchLogService
 from app.services.user_service import UserService
 from app.services.recharge_service import RechargeService
 from common.services.settlement_service import BALANCE_KEY
-from common.utils.internal_auth import build_internal_headers
 
 from common.utils.time_utils import get_beijing_now_naive, safe_isoformat
 router = APIRouter(tags=["admin"])
@@ -413,7 +412,15 @@ async def get_system_logs(
     if not log_dir.exists():
         return {"success": False, "message": "日志目录不存在", "logs": [], "total": 0}
  
-    log_files = sorted(log_dir.glob("*.log"), key=lambda item: item.stat().st_mtime)
+    # 普通日志已经包含 ERROR 及以上级别；error.log 是其副本，聚合展示时排除，避免同一条错误重复出现。
+    log_files = sorted(
+        (
+            log_file
+            for log_file in log_dir.glob("*.log")
+            if log_file.name != "error.log" and not log_file.name.startswith("error.")
+        ),
+        key=lambda item: item.stat().st_mtime,
+    )
     if not log_files:
         return {"success": True, "logs": [], "total": 0}
  
@@ -739,7 +746,7 @@ async def _notify_scheduler_reload() -> bool:
         url = f"{settings.scheduler_service_url}/internal/tasks/reload"
 
         # 内部接口鉴权头（X-Internal-Token 共享密钥）
-        response = await http_client.post(url, headers=build_internal_headers(settings))
+        response = await http_client.post(url)
         
         if response.get("success"):
             logger.info("[定时任务配置] 已通知Scheduler服务重新加载配置")
@@ -850,7 +857,7 @@ async def update_scheduled_task(
             http_client = get_http_client()
             url = f"{settings.scheduler_service_url}/internal/tasks/reload"
             # 内部接口鉴权头（X-Internal-Token 共享密钥）
-            response = await http_client.post(url, headers=build_internal_headers(settings))
+            response = await http_client.post(url)
             if response.get("success"):
                 reload_success = True
                 logger.info(f"[定时任务配置] 已通知Scheduler服务重新加载配置: {task_code}")
@@ -897,7 +904,7 @@ async def trigger_scheduled_task(
         http_client = get_http_client()
         url = f"{settings.scheduler_service_url}/internal/tasks/{task_code}/trigger"
         # 内部接口鉴权头（X-Internal-Token 共享密钥）
-        response = await http_client.post(url, headers=build_internal_headers(settings))
+        response = await http_client.post(url)
         
         if response.get("success"):
             logger.info(f"[定时任务] 手动触发任务成功: {task_code}")

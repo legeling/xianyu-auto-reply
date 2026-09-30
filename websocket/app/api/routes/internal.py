@@ -13,20 +13,36 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.core.config import get_settings
+from common.services.account_cookie_service import merge_account_cookie_fields
 from common.services.captcha.concurrency import run_browser_task
 from common.services.captcha.slider_mode import (
     SLIDER_MODE_REAL_MOUSE,
     refresh_slider_mode_from_database,
 )
 from common.services.captcha.weighted_runner import real_mouse_weighted_runner
-from common.utils.internal_auth import make_internal_token_dependency
+from common.services.im_token_api import (
+    extract_im_access_token,
+    request_im_token_with_fallback,
+)
+from common.services.risk_control_log_query_service import (
+    check_account_processing_risk_control_log,
+    get_account_risk_control_lock,
+)
+from common.services.token_renewal_cache_service import (
+    delete_token_cache,
+    mark_token_cache_expired,
+    upsert_token_cache,
+    write_renewed_token_cache,
+)
+from common.services.token_api_mode import load_token_api_mode
+from common.utils.xianyu_utils import trans_cookies
+from app.api.deps import require_internal_auth
+from app.utils.captcha_engine import normalize_captcha_engine
 
-# 安全：内部接口统一鉴权（X-Internal-Token 共享密钥，fail-closed，详见 common/utils/internal_auth.py）
 router = APIRouter(
     prefix="/internal",
     tags=["internal"],
-    dependencies=[Depends(make_internal_token_dependency(get_settings))],
+    dependencies=[Depends(require_internal_auth)],
 )
 
 
@@ -40,6 +56,8 @@ class SendMessageRequest(BaseModel):
     """发送消息请求"""
     chat_id: str
     message: str
+    # 接收方（买家）用户ID；缺省时发送协议里的接收人会变成 None@goofish，买家收不到
+    to_user_id: str | None = None
     # 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）。默认 False 保持既有调用方零影响。
     wait_result: bool = False
     wait_timeout: float = 10.0
@@ -57,6 +75,11 @@ class DeliverOrderRequest(BaseModel):
     # 订单数量：>1 时接口会按数量循环获取并发送 N 张卡券（与自动发货 multi_quantity_delivery 语义对齐）。
     # 默认为 1 保持旧调用方零成本兼容；调用方应该按订单实际 quantity 字段（XYOrder.quantity）传入。
     quantity: int = 1
+
+
+class AgreePickupDeliverRequest(BaseModel):
+    """同意后发货-提货页发货请求（内部接口，由 backend-web 公开层校验订单后调用）"""
+    order_no: str
 
 
 class ConfirmNoLogisticsRequest(BaseModel):
@@ -88,8 +111,9 @@ class LogRetentionRequest(BaseModel):
 
 
 class SolveCaptchaRequest(BaseModel):
-    """过滑块请求（模式B：仅凭 punish 链接求解，不依赖账号/数据库）"""
+    """过滑块请求；可选携带续期上下文用于成功后持久化。"""
     account_id: str = ""          # 外部标识，仅用于日志与浏览器实例隔离
+    account_row_id: int | None = None # xy_accounts.id，传入后成功时精准写回 Cookie
     url: str                      # punish 验证链接（punish?x5secdata=...）
     browser_timeout: int = 40     # 单次浏览器超时（秒）
     call_type: str = "remote"     # 调用类型：local-本机 / remote-远程
@@ -98,6 +122,10 @@ class SolveCaptchaRequest(BaseModel):
                                   # 传入后链接过期时可凭此 Cookie 重取新链接继续处理。
     device_id: str = ""           # 可选：设备 ID，配合 cookies 重新请求 token 接口使用
     risk_log_id: int | None = None # backend-web 准入锁内预先创建的风控日志 ID
+    token_cache_id: int | None = None # xy_token_cache.id，传入后可写入续期 Token
+    token_user_id: str = ""       # Token 缓存用户 ID
+    persist_token_cache: bool = False # 是否由 WebSocket 端完成 Token 缓存写入
+    token_cache_write_mode: str = "renewal" # renewal-条件续期 / upsert-基础缓存新增或更新
 
 
 @router.post("/logs/retention")
@@ -301,15 +329,15 @@ async def restart_account(account_id: str, request: StartAccountRequest = None):
                     logger.warning(f"解析Cookie获取unb失败: {parse_e}")
                     unb = ""
 
-            # 3) 用正确的 unb 作为 user_id 删除 Token 缓存
+            # 3) 用正确的 unb 作为唯一 user_id 删除 Token 缓存
             if unb:
-                async with async_session_maker() as session:
-                    await session.execute(
-                        text("DELETE FROM xy_token_cache WHERE user_id = :user_id"),
-                        {"user_id": unb},
-                    )
-                    await session.commit()
-                    logger.info(f"账号重启前已清除Token缓存: account_id={account_id}, user_id={unb}")
+                invalidation = await delete_token_cache(
+                    token_user_id=unb,
+                )
+                logger.info(
+                    f"账号重启前{invalidation.message}: "
+                    f"account_id={account_id}, user_id={unb}"
+                )
             else:
                 logger.warning(f"未能解析出unb，跳过Token缓存清除: account_id={account_id}")
         except Exception as cache_e:
@@ -346,10 +374,11 @@ async def restart_account(account_id: str, request: StartAccountRequest = None):
 
 @router.post("/captcha/solve")
 async def solve_captcha(request: SolveCaptchaRequest):
-    """过滑块（独立/无状态）：仅凭传入的 punish 链接求解滑块。
+    """凭 punish 链接求解滑块，并按可选上下文持久化结果。
 
-    模式B：不依赖账号是否运行、不查数据库、不注入/回填 cookies。
-    成功返回解出的 x5* cookies，失败直接返回 success=false（供外部系统使用）。
+    默认模式不依赖账号是否运行，也不写账号或 Token 缓存；携带账号行 ID
+    与 Token 缓存上下文时，成功后会写回 Cookie 并更新对应缓存。
+    成功返回解出的 Cookie，失败直接返回 success=false（供外部系统使用）。
     远程调用会记录风控日志（call_type=remote，call_user=调用用户）。
     """
     import re
@@ -366,15 +395,21 @@ async def solve_captcha(request: SolveCaptchaRequest):
     timeout = max(20, min(int(request.browser_timeout or 40), 120))
     call_type = (request.call_type or "remote").strip() or "remote"
     call_user = (request.call_user or "").strip() or None
+    existing_cookies_str = (request.cookies or "").strip()
+    device_id = (request.device_id or "").strip()
+    refetched_token_result: dict[str, object] = {}
 
     # 记录风控日志（处理中）
     log_id = request.risk_log_id if request.risk_log_id and request.risk_log_id > 0 else None
     start_ts = _time.time()
-    if not log_id:
+
+    def _create_processing_log() -> int | None:
         try:
             from common.db.compat import db_manager
-            log_id = db_manager.add_risk_control_log(
-                cookie_id=safe_id,
+            return db_manager.add_risk_control_log(
+                # safe_id 仅用于日志展示和浏览器目录隔离；数据库查询必须使用
+                # 原始账号标识，否则特殊字符账号会出现“写入与查询不一致”。
+                cookie_id=raw_id,
                 event_type="slider_captcha",
                 event_description=f"触发场景: 远程过滑块接口, URL: {url}",
                 processing_status="processing",
@@ -383,6 +418,35 @@ async def solve_captcha(request: SolveCaptchaRequest):
             )
         except Exception as log_e:
             logger.error(f"【过滑块接口】记录风控日志失败: {log_e}")
+            return None
+
+    if request.persist_token_cache and not log_id:
+        async with get_account_risk_control_lock(raw_id):
+            processing_check = await check_account_processing_risk_control_log(raw_id)
+            if processing_check.has_processing:
+                logger.warning(
+                    f"【过滑块接口】account_id={safe_id} {processing_check.message}，"
+                    "本次不重复处理"
+                )
+                return {
+                    "success": False,
+                    "code": 200,
+                    "message": f"{processing_check.message}，本次不重复处理",
+                    "data": {
+                        "processing_conflict": True,
+                        "processing_check_success": processing_check.success,
+                    },
+                }
+            log_id = _create_processing_log()
+        if not log_id:
+            return {
+                "success": False,
+                "code": 200,
+                "message": "创建风控处理日志失败，本次未启动滑块任务",
+                "data": None,
+            }
+    if not log_id:
+        log_id = _create_processing_log()
 
     def _update_log(
         status: str,
@@ -396,12 +460,195 @@ async def solve_captcha(request: SolveCaptchaRequest):
             from common.db.compat import db_manager as _dm
             kwargs = {"processing_status": status, "processing_result": result}
             if engine is not None:
-                kwargs["captcha_engine"] = engine
+                normalized_engine, error = normalize_captcha_engine(engine, error)
+                kwargs["captcha_engine"] = normalized_engine
             if error is not None:
                 kwargs["error_message"] = error
             _dm.update_risk_control_log(log_id=log_id, **kwargs)
         except Exception as ue:
             logger.error(f"【过滑块接口】更新风控日志失败: {ue}")
+
+    def _merged_cookie_string(cookie_updates: dict[str, object] | None) -> str:
+        try:
+            merged = trans_cookies(existing_cookies_str)
+        except Exception:
+            merged = {}
+        for name, value in (cookie_updates or {}).items():
+            clean_name = str(name).strip()
+            if clean_name:
+                merged[clean_name] = "" if value is None else str(value)
+        return "; ".join(f"{name}={value}" for name, value in merged.items())
+
+    async def _persist_cookie_updates(
+        cookie_updates: dict[str, object] | None,
+        source: str,
+    ) -> tuple[str, bool, str]:
+        if not cookie_updates:
+            return existing_cookies_str, True, "未返回新Cookie，无需写回"
+        merged_cookies_str = _merged_cookie_string(cookie_updates)
+        if not request.account_row_id or request.account_row_id <= 0:
+            return merged_cookies_str, False, "未携带账号行ID，未写回Cookie"
+        try:
+            saved_cookies_str = await merge_account_cookie_fields(
+                int(request.account_row_id),
+                raw_id,
+                cookie_updates,
+            )
+        except Exception as persist_error:
+            message = (
+                f"{source}返回Cookie合并写回异常："
+                f"{type(persist_error).__name__}: {persist_error}"
+            )
+            logger.error(f"【过滑块接口】account_id={safe_id} {message}")
+            return merged_cookies_str, False, message
+        if saved_cookies_str:
+            msg = f"{source}返回Cookie已写回数据库"
+            logger.info(f"【过滑块接口】account_id={safe_id} {msg}")
+            return saved_cookies_str, True, msg
+        msg = f"{source}返回Cookie合并写回失败"
+        logger.error(f"【过滑块接口】account_id={safe_id} {msg}")
+        return merged_cookies_str, False, msg
+
+    async def _persist_token_cache(
+        token: object,
+        merged_cookies_str: str,
+        cookie_saved: bool,
+    ) -> dict:
+        nonlocal device_id
+        if not request.persist_token_cache:
+            return {}
+        if not cookie_saved:
+            return {"token_cache_saved": False, "token_cache_message": "Cookie未写回，跳过Token缓存写入"}
+        token_user_id = (request.token_user_id or "").strip()
+        write_mode = (request.token_cache_write_mode or "renewal").strip().lower()
+        if not (token_user_id and device_id):
+            return {"token_cache_saved": False, "token_cache_message": "缺少Token缓存写入上下文"}
+        if write_mode == "renewal" and not request.token_cache_id:
+            return {"token_cache_saved": False, "token_cache_message": "缺少续期Token缓存行ID"}
+        if write_mode not in {"renewal", "upsert"}:
+            return {
+                "token_cache_saved": False,
+                "token_cache_message": f"不支持的Token缓存写入模式：{write_mode}",
+            }
+
+        new_token = str(token or "").strip()
+        token_response_cookies: dict[str, object] = {}
+        token_response_cookie_saved = True
+
+        def _token_cache_failure(message: str) -> dict:
+            data = {
+                "token_cache_saved": False,
+                "token_cache_message": message,
+                "token_response_cookie_saved": token_response_cookie_saved,
+            }
+            if token_response_cookies:
+                data["token_response_cookies"] = dict(token_response_cookies)
+            return data
+
+        if not new_token:
+            try:
+                token_request_cookies = merged_cookies_str
+                last_token_response: object = None
+                # Token接口方式实时查库，与 WebSocket 主流程保持一致
+                token_api_mode = await load_token_api_mode(safe_id)
+                for token_attempt in range(2):
+                    token_result = await request_im_token_with_fallback(
+                        token_request_cookies,
+                        device_id,
+                        api_mode=token_api_mode,
+                        log_tag=safe_id,
+                    )
+                    if token_result.device_id:
+                        device_id = token_result.device_id
+                    last_token_response = token_result.response_json
+                    if token_result.response_cookies:
+                        response_cookies = dict(token_result.response_cookies)
+                        token_response_cookies.update(response_cookies)
+                        (
+                            token_request_cookies,
+                            response_cookie_saved,
+                            response_cookie_message,
+                        ) = await _persist_cookie_updates(
+                            response_cookies,
+                            "滑块后Token接口",
+                        )
+                        if not response_cookie_saved:
+                            token_response_cookie_saved = False
+                            return _token_cache_failure(response_cookie_message)
+
+                    new_token = extract_im_access_token(token_result.response_json) or ""
+                    if new_token:
+                        break
+                    if token_attempt == 0 and token_result.response_cookies:
+                        logger.info(
+                            f"【过滑块接口】account_id={safe_id} Token接口下发新Cookie，"
+                            "合并后重试一次"
+                        )
+                        continue
+
+                    response_detail = str(
+                        token_result.response_json.get("ret")
+                        if isinstance(token_result.response_json, dict)
+                        else last_token_response
+                    )[:300]
+                    return _token_cache_failure(
+                        (
+                            "滑块后重试Token接口仍未返回accessToken"
+                            f"：{response_detail or '未返回错误说明'}"
+                        )
+                    )
+                if not new_token:
+                    return _token_cache_failure(
+                        "滑块后重试Token接口仍未返回accessToken"
+                    )
+            except Exception as exc:
+                return _token_cache_failure(
+                    f"滑块后重试Token接口异常：{type(exc).__name__}: {exc}"
+                )
+
+        if write_mode == "upsert":
+            cache_write = await upsert_token_cache(
+                token_user_id=token_user_id,
+                device_id=device_id,
+                token=new_token,
+            )
+            data = {
+                "token_cache_saved": cache_write.success,
+                "token_cache_message": cache_write.message,
+                "token_response_cookie_saved": token_response_cookie_saved,
+            }
+            if cache_write.expire_at:
+                data["expire_at"] = cache_write.expire_at.isoformat()
+            if token_response_cookies:
+                data["token_response_cookies"] = token_response_cookies
+            return data
+
+        cache_write = await write_renewed_token_cache(
+            cache_id=int(request.token_cache_id),
+            token_user_id=token_user_id,
+            device_id=device_id,
+            token=new_token,
+        )
+        data = {
+            "token_cache_saved": cache_write.success,
+            "token_cache_message": cache_write.message,
+            "token_response_cookie_saved": token_response_cookie_saved,
+        }
+        if cache_write.renew_expire_at:
+            data["renew_expire_at"] = cache_write.renew_expire_at.isoformat()
+        if token_response_cookies:
+            data["token_response_cookies"] = token_response_cookies
+        return data
+
+    def _log_token_cache_result(result_data: dict) -> None:
+        """记录异步持久化结果，调用方超时后仍可定位具体原因。"""
+        if not request.persist_token_cache:
+            return
+        message = str(result_data.get("token_cache_message") or "Token缓存写入结果未知")
+        if result_data.get("token_cache_saved"):
+            logger.info(f"【过滑块接口】account_id={safe_id} {message}")
+        else:
+            logger.error(f"【过滑块接口】account_id={safe_id} {message}")
 
     try:
         from app.services.captcha.slider_stealth import run_slider_verification_with_fallback
@@ -411,10 +658,7 @@ async def solve_captcha(request: SolveCaptchaRequest):
         #   - 构造 url_provider，遇到"抱歉，页面访问出现了问题"（链接过期）时凭 Cookie 重取新链接，
         #     与本机处理滑块的逻辑保持一致。
         # 未传 Cookie 时保持原模式B：链接过期或失败直接判失败（cookies="" / url_provider=None）。
-        existing_cookies_str = (request.cookies or "").strip()
-        device_id = (request.device_id or "").strip()
         url_provider = None
-        refetched_token_result: dict[str, object] = {}
         if existing_cookies_str:
             from common.services.captcha.token_refetch import request_fresh_captcha_url
             from app.services.captcha.slider_stealth import CAPTCHA_NOT_REQUIRED
@@ -424,12 +668,29 @@ async def solve_captcha(request: SolveCaptchaRequest):
                 _cookies_dict = trans_cookies(existing_cookies_str)
             except Exception:
                 _cookies_dict = {}
+            refetch_cookies_state = [existing_cookies_str]
 
             def _remote_url_provider():
                 """凭传入的 Cookie 重新请求 token 接口，拿到新鲜验证链接（远程端链接过期兜底）。"""
-                res = request_fresh_captcha_url(safe_id, _cookies_dict, existing_cookies_str, device_id)
+                res = request_fresh_captcha_url(
+                    safe_id,
+                    _cookies_dict,
+                    refetch_cookies_state[0],
+                    device_id,
+                )
+                accumulated_cookies = dict(
+                    refetched_token_result.get("new_cookies") or {}
+                )
                 refetched_token_result.clear()
                 refetched_token_result.update(res)
+                response_cookies = res.get("new_cookies")
+                if isinstance(response_cookies, dict) and response_cookies:
+                    accumulated_cookies.update(response_cookies)
+                    _cookies_dict.update(response_cookies)
+                    refetch_cookies_state[0] = "; ".join(
+                        f"{name}={value}" for name, value in _cookies_dict.items()
+                    )
+                refetched_token_result["new_cookies"] = accumulated_cookies
                 if res.get("token_ok"):
                     # 风控已解除、无需滑块：返回哨兵，让上层提前结束滑块流程
                     return CAPTCHA_NOT_REQUIRED
@@ -461,8 +722,25 @@ async def solve_captcha(request: SolveCaptchaRequest):
                 weight_class=weight_class,
                 slider_mode=selected_slider_mode,
             )
+    except asyncio.CancelledError:
+        cancelled_cookies = refetched_token_result.get("new_cookies")
+        if isinstance(cancelled_cookies, dict) and cancelled_cookies:
+            await _persist_cookie_updates(cancelled_cookies, "重取Token")
+        logger.warning(f"【过滑块接口】account_id={safe_id} 执行任务被取消")
+        raise
     except Exception as e:
         logger.error(f"【过滑块接口】account_id={safe_id} 执行异常: {e}")
+        exception_cookie_data: dict[str, object] = {}
+        exception_cookies = refetched_token_result.get("new_cookies")
+        if isinstance(exception_cookies, dict) and exception_cookies:
+            _, exception_cookie_saved, exception_cookie_message = (
+                await _persist_cookie_updates(exception_cookies, "重取Token")
+            )
+            exception_cookie_data = {
+                "cookies": exception_cookies,
+                "cookie_saved": exception_cookie_saved,
+                "cookie_message": exception_cookie_message,
+            }
         _update_log(
             "error",
             f"过滑块执行异常，耗时: {_time.time() - start_ts:.2f}秒",
@@ -472,15 +750,37 @@ async def solve_captcha(request: SolveCaptchaRequest):
             "success": False,
             "code": 500,
             "message": f"过滑块执行异常: {str(e)}",
-            "data": None,
+            "data": exception_cookie_data or None,
             "_risk_log_id": log_id,
         }
 
     duration = _time.time() - start_ts
+    refetched_cookies = refetched_token_result.get("new_cookies")
+    if not isinstance(refetched_cookies, dict):
+        refetched_cookies = {}
+
     if success and not cookies and refetched_token_result.get("token_ok"):
-        refreshed_cookies = refetched_token_result.get("new_cookies")
-        if not isinstance(refreshed_cookies, dict):
-            refreshed_cookies = {}
+        refetched_device_id = str(refetched_token_result.get("device_id") or "").strip()
+        if refetched_device_id:
+            device_id = refetched_device_id
+        merged_cookies_str, cookie_saved, cookie_message = await _persist_cookie_updates(
+            refetched_cookies,
+            "重取Token",
+        )
+        token_cache_data = await _persist_token_cache(
+            refetched_token_result.get("new_token"),
+            merged_cookies_str,
+            cookie_saved,
+        )
+        _log_token_cache_result(token_cache_data)
+        token_response_cookies = token_cache_data.pop("token_response_cookies", {})
+        token_response_cookie_saved = bool(
+            token_cache_data.pop("token_response_cookie_saved", True)
+        )
+        cookie_saved = cookie_saved and token_response_cookie_saved
+        if not token_response_cookie_saved:
+            cookie_message = f"{cookie_message}；滑块后Token接口Cookie合并写回失败"
+        returned_cookies = {**refetched_cookies, **token_response_cookies}
         _update_log(
             "success",
             f"重取验证链接时Token已可用，无需滑块，耗时: {duration:.2f}秒",
@@ -492,13 +792,40 @@ async def solve_captcha(request: SolveCaptchaRequest):
             "message": "Token已可用，无需滑块",
             "data": {
                 "engine": engine,
-                "cookies": refreshed_cookies,
+                "cookies": returned_cookies,
                 "token_already_available": True,
                 "url_expired": False,
+                "cookie_saved": cookie_saved,
+                "cookie_message": cookie_message,
+                **token_cache_data,
             },
             "_risk_log_id": log_id,
         }
     if success and cookies:
+        # 浏览器 Cookie 与重取链接时 Token 接口下发的 Cookie 一次性合并写回，
+        # 防止 fresh_url 分支丢失新 _m_h5_tk。
+        # 浏览器可能返回注入时的全量旧 Cookie，重取 Token 接口
+        # 下发的是已知最新增量，同名字段必须以重取结果为准。
+        combined_cookies = dict(cookies)
+        combined_cookies.update(refetched_cookies)
+        merged_cookies_str, cookie_saved, cookie_message = await _persist_cookie_updates(
+            combined_cookies,
+            "过滑块",
+        )
+        token_cache_data = await _persist_token_cache(
+            None,
+            merged_cookies_str,
+            cookie_saved,
+        )
+        _log_token_cache_result(token_cache_data)
+        token_response_cookies = token_cache_data.pop("token_response_cookies", {})
+        token_response_cookie_saved = bool(
+            token_cache_data.pop("token_response_cookie_saved", True)
+        )
+        cookie_saved = cookie_saved and token_response_cookie_saved
+        if not token_response_cookie_saved:
+            cookie_message = f"{cookie_message}；滑块后Token接口Cookie合并写回失败"
+        returned_cookies = {**combined_cookies, **token_response_cookies}
         _update_log(
             "success",
             f"远程过滑块成功，耗时: {duration:.2f}秒",
@@ -508,11 +835,28 @@ async def solve_captcha(request: SolveCaptchaRequest):
             "success": True, "code": 200, "message": "过滑块成功",
             "data": {
                 "engine": engine,
-                "cookies": cookies,
+                "cookies": returned_cookies,
                 "url_expired": False,
+                "cookie_saved": cookie_saved,
+                "cookie_message": cookie_message,
+                **token_cache_data,
             },
             "_risk_log_id": log_id,
         }
+    # 即使滑块最终失败，重取验证链接阶段下发的 Cookie 也必须写回，避免下一轮
+    # 继续使用已经过期的 _m_h5_tk。
+    failure_cookie_data: dict[str, object] = {}
+    if refetched_cookies:
+        _, refetch_cookie_saved, refetch_cookie_message = await _persist_cookie_updates(
+            refetched_cookies,
+            "重取Token",
+        )
+        failure_cookie_data = {
+            "cookies": refetched_cookies,
+            "cookie_saved": refetch_cookie_saved,
+            "cookie_message": refetch_cookie_message,
+        }
+
     # 验证链接已过期：明确告知调用方刷新URL后重试（区别于普通过滑块失败）
     # 注意：url_expired 不是"通过引擎"，不写入 captcha_engine 字段（避免污染引擎枚举/前端展示），
     # 过期信息体现在 processing_result 文案与返回体 data 中即可。
@@ -523,7 +867,11 @@ async def solve_captcha(request: SolveCaptchaRequest):
         )
         return {
             "success": False, "code": 200, "message": "验证链接已过期，请刷新URL后重试",
-            "data": {"engine": engine, "url_expired": True},
+            "data": {
+                "engine": engine,
+                "url_expired": True,
+                **failure_cookie_data,
+            },
             "_risk_log_id": log_id,
         }
     _update_log(
@@ -535,7 +883,11 @@ async def solve_captcha(request: SolveCaptchaRequest):
         "success": False,
         "code": 200,
         "message": "过滑块失败",
-        "data": {"engine": engine, "url_expired": False},
+        "data": {
+            "engine": engine,
+            "url_expired": False,
+            **failure_cookie_data,
+        },
         "_risk_log_id": log_id,
     }
 
@@ -636,11 +988,19 @@ async def send_message(account_id: str, request: SendMessageRequest):
                 "data": None,
             }
         
+        if not request.to_user_id:
+            return {
+                "success": False,
+                "code": 400,
+                "message": "缺少接收方用户ID(to_user_id)",
+                "data": None,
+            }
+
         # 发送消息
         send_result = await instance.send_msg(
             websocket=instance.ws,
             chat_id=request.chat_id,
-            send_user_id=None,  # 由实例内部获取
+            send_user_id=request.to_user_id,
             content=request.message,
         )
 
@@ -705,6 +1065,37 @@ async def confirm_no_logistics(request: ConfirmNoLogisticsRequest):
     xianyu_live = get_manager().instances.get(request.account_id)
     if not xianyu_live:
         return {"success": False, "code": 404, "message": "账号未连接", "data": None}
+
+    if xianyu_live.is_only_send_card_enabled():
+        return {
+            "success": False,
+            "code": 409,
+            "message": "账号已开启只发卡券不确认发货，不能执行无物流确认发货",
+            "data": None,
+        }
+
+    # 同意后发货同样不确认发货（只推送提货信息），禁止无物流确认发货
+    if xianyu_live.is_agree_deliver_enabled():
+        return {
+            "success": False,
+            "code": 409,
+            "message": "账号已开启同意后发货不确认发货，不能执行无物流确认发货",
+            "data": None,
+        }
+
+    # 无物流发货同样属于实际发货入口，金额为0时先刷新订单详情，避免绕过金额保护。
+    amount_ok = await xianyu_live.auto_delivery_handler._ensure_order_amount_before_delivery(
+        order_id=request.order_no,
+        item_id=request.item_id,
+        buyer_id=request.buyer_id,
+    )
+    if not amount_ok:
+        return {
+            "success": False,
+            "code": 400,
+            "message": "订单金额为0，发货前刷新订单详情失败，请稍后重试",
+            "data": None,
+        }
 
     if request.is_bargain:
         result = await xianyu_live.auto_delivery_handler.auto_freeshipping(
@@ -817,6 +1208,162 @@ async def _record_delivery_log(
 
 @router.post("/orders/deliver")
 async def deliver_order(request: DeliverOrderRequest):
+    """订单发货入口；先用账号实例的本地订单锁串行，再进入完整发货流程。"""
+    from app.services.xianyu.cookie_manager import get_manager
+    from common.db.compat import db_manager
+
+    order_info = db_manager.get_order_by_id(request.order_no)
+    account_id = order_info.get('account_id') if order_info else None
+    xianyu_live = get_manager().instances.get(account_id) if account_id else None
+    if not xianyu_live:
+        return await _deliver_order_impl(request)
+
+    local_order_lock = xianyu_live._order_locks[request.order_no]
+    try:
+        await asyncio.wait_for(local_order_lock.acquire(), timeout=5)
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "code": 409,
+            "message": "订单正在被其他进程处理，请稍后再试",
+            "data": None,
+        }
+
+    try:
+        return await _deliver_order_impl(request)
+    finally:
+        if local_order_lock.locked():
+            local_order_lock.release()
+
+
+def _agree_pickup_shipping_ok(result: dict | None) -> bool:
+    """确认发货/免拼发货结果是否可继续发卡券（成功或平台已发货均视为通过）
+
+    判定逻辑统一收敛到 common.services.delivery_utils.is_shipping_result_ok，
+    本函数仅作为同意后发货流程内的语义化别名保留。
+    """
+    from common.services.delivery_utils import is_shipping_result_ok
+
+    return is_shipping_result_ok(result)
+
+
+@router.post("/orders/agree-pickup-deliver")
+async def agree_pickup_deliver(request: AgreePickupDeliverRequest):
+    """同意后发货：买家在公开提货页点击「同意」后触发的真实发货。
+
+    流程：免拼(小刀)→确认发货（均 force=True 绕过「只发卡券/同意后发货」守卫）
+    → 取唯一自有卡券内容 → 落库并返回卡券内容供页面展示。
+    对接卡券因结算财务风险暂不支持（返回失败提示联系卖家）。
+    跨进程并发由 backend-web 的 Redis 锁保证，这里再用账号实例本地订单锁串行。
+    """
+    from app.services.xianyu.cookie_manager import get_manager
+    from common.db.compat import db_manager
+
+    order_info = db_manager.get_order_by_id(request.order_no)
+    if not order_info:
+        return {"success": False, "code": 404, "message": "订单不存在", "data": None}
+    account_id = order_info.get('account_id')
+    xianyu_live = get_manager().instances.get(account_id) if account_id else None
+    if not xianyu_live:
+        return {
+            "success": False, "code": 200,
+            "message": "卖家账号当前不在线，暂时无法发货，请稍后重试或联系卖家",
+            "data": None,
+        }
+
+    local_order_lock = xianyu_live._order_locks[request.order_no]
+    try:
+        await asyncio.wait_for(local_order_lock.acquire(), timeout=5)
+    except asyncio.TimeoutError:
+        return {"success": False, "code": 409, "message": "订单正在处理中，请稍后再试", "data": None}
+    try:
+        return await _agree_pickup_deliver_impl(xianyu_live, request.order_no)
+    finally:
+        if local_order_lock.locked():
+            local_order_lock.release()
+
+
+async def _agree_pickup_deliver_impl(xianyu_live, order_no: str):
+    """同意后发货核心流程（调用方已持有本地订单锁）"""
+    from loguru import logger
+    from common.db.compat import db_manager
+    from common.services.agree_pickup_delivery import (
+        consume_card_and_record,
+        pick_unique_own_card,
+        read_order_snapshot,
+    )
+
+    handler = xianyu_live.auto_delivery_handler
+
+    snapshot = await read_order_snapshot(order_no)
+    if not snapshot:
+        return {"success": False, "code": 404, "message": "订单不存在", "data": None}
+
+    # 幂等：已同意且已有发货内容，直接返回，不重复发货/耗卡
+    if snapshot['agree_deliver_agreed'] and snapshot['delivery_content']:
+        return {
+            "success": True, "code": 200, "message": "您已同意发货，以下为发货内容",
+            "data": {"order_no": order_no, "content": snapshot['delivery_content'], "already_agreed": True},
+        }
+
+    item_id = snapshot['item_id']
+    if not item_id:
+        return {"success": False, "code": 200, "message": "订单缺少商品信息，无法发货，请联系卖家", "data": None}
+
+    # 先选卡（存在性校验）：无可用/非自有卡券则不触发确认发货，直接提示
+    cards = db_manager.get_cards_by_item_id(item_id, snapshot['spec_name'], snapshot['spec_value'])
+    card, card_err = pick_unique_own_card(cards)
+    if card_err:
+        return {"success": False, "code": 200, "message": card_err, "data": None}
+
+    card_type = card.get('type')
+    if card_type not in ('text', 'data', 'image', 'api'):
+        return {"success": False, "code": 200, "message": f"不支持的卡券类型：{card_type}，请联系卖家", "data": None}
+
+    # 多数量：text/image 固定内容退化为 1；其余按商品「多数量发货」开关决定
+    quantity = snapshot['quantity']
+    if card_type in ('text', 'image'):
+        quantity = 1
+    elif quantity > 1:
+        try:
+            if not db_manager.get_item_multi_quantity_delivery_status(snapshot['account_id'], item_id):
+                quantity = 1
+        except Exception as e:
+            logger.warning(f"【同意后发货】查询商品多数量发货开关异常，按 1 份处理: {e}")
+            quantity = 1
+
+    # 免拼(小刀) → 确认发货（force=True 绕过 只发卡券/同意后发货 守卫，真实调用平台接口）
+    if snapshot['is_bargain']:
+        fs = await handler.auto_freeshipping(
+            order_id=order_no, item_id=item_id, buyer_id=snapshot['buyer_id'], force=True
+        )
+        if not _agree_pickup_shipping_ok(fs):
+            reason = (fs or {}).get('error') or (fs or {}).get('message') or '未知错误'
+            logger.warning(f"【同意后发货】订单 {order_no} 免拼发货失败: {reason}")
+            return {"success": False, "code": 200, "message": f"免拼发货失败，请稍后重试或联系卖家：{reason}", "data": None}
+
+    cf = await handler.auto_confirm(order_id=order_no, item_id=item_id, force=True)
+    if not _agree_pickup_shipping_ok(cf):
+        reason = (cf or {}).get('error') or (cf or {}).get('message') or '未知错误'
+        logger.warning(f"【同意后发货】订单 {order_no} 确认发货失败: {reason}")
+        return {"success": False, "code": 200, "message": f"确认发货失败，请稍后重试或联系卖家：{reason}", "data": None}
+
+    # 取卡内容 + 落库（同一事务：确认成功后再消费卡券，落库失败则整体回滚）
+    context = {
+        'order_no': order_no,
+        'buyer_id': snapshot['buyer_id'] or '',
+        'buyer_name': snapshot['buyer_fish_nick'] or '',
+    }
+    ok, msg, content = await consume_card_and_record(order_no, card.get('id'), quantity, context)
+    if not ok:
+        logger.warning(f"【同意后发货】订单 {order_no} 取卡/落库失败: {msg}")
+        return {"success": False, "code": 200, "message": msg, "data": None}
+
+    logger.info(f"【同意后发货】订单 {order_no} 买家已同意，发货完成，卡券内容已生成")
+    return {"success": True, "code": 200, "message": msg, "data": {"order_no": order_no, "content": content}}
+
+
+async def _deliver_order_impl(request: DeliverOrderRequest):
     """
     订单发货接口
     
@@ -855,25 +1402,49 @@ async def deliver_order(request: DeliverOrderRequest):
                 detail=f"订单不存在: {request.order_no}"
             )
         
-        # 检查订单金额，金额为0禁止发货
-        order_amount = order_info.get('amount')
-        if order_amount is not None:
-            from decimal import Decimal
-            if Decimal(str(order_amount)) <= 0:
-                logger.warning(f"【内部API】❌ 订单 {request.order_no} 金额为 {order_amount}，禁止发货")
-                return {
-                    "success": False,
-                    "code": 400,
-                    "message": "订单金额为0，禁止发货",
-                    "data": None
-                }
-
         account_id = order_info.get('account_id')
         if not account_id:
             raise HTTPException(
                 status_code=400,
                 detail="订单缺少账号信息"
             )
+
+        # 只发卡券模式下平台状态会一直保持待发货，不能再依赖 status 防重复。
+        # 在所有调用方共用的底层入口兜底，避免手动发货或跨服务调用重复耗卡。
+        if order_info.get('card_only_delivered'):
+            logger.info(f"【内部API】订单 {request.order_no} 已完成只发卡券，跳过重复处理")
+            return {
+                "success": True,
+                "code": 200,
+                "message": "该订单已发送过卡券，本次未重复发送",
+                "data": {
+                    "order_no": request.order_no,
+                    "delivery_type": None,
+                    "content": order_info.get('delivery_content') or '',
+                    "delivery_method": order_info.get('delivery_method') or request.delivery_method,
+                    "is_card_only": False,
+                    "only_send_card": True,
+                    "already_card_only_delivered": True,
+                    "quantity_requested": int(request.quantity or 1),
+                    "quantity_sent": 0,
+                },
+            }
+
+        # 只发卡券模式会跳过平台确认接口，因此这里必须保留本地已发货幂等判断；
+        # 否则平台已发货但本地未写 card_only_delivered 时，直调内部接口会再次发送卡券。
+        if str(order_info.get('status') or '').lower() in {'shipped', 'completed'}:
+            logger.info(f"【内部API】订单 {request.order_no} 本地已发货，跳过重复处理")
+            return {
+                "success": True,
+                "code": 200,
+                "message": "订单已发货，状态已同步",
+                "data": {
+                    "order_no": request.order_no,
+                    "already_shipped": True,
+                    "delivery_content": order_info.get('delivery_content') or '',
+                    "delivery_method": order_info.get('delivery_method') or request.delivery_method,
+                },
+            }
         
         # 获取 CookieManager 实例
         manager = get_manager()
@@ -884,6 +1455,29 @@ async def deliver_order(request: DeliverOrderRequest):
                 status_code=404,
                 detail=f"账号 {account_id} 未启动或不存在"
             )
+
+        # 检查订单金额，金额为0时仅在实际发货入口刷新一次订单详情。
+        # 正常金额不会请求详情接口，避免普通状态消息带来额外API调用。
+        try:
+            amount_ok = await xianyu_live.auto_delivery_handler._ensure_order_amount_before_delivery(
+                order_id=request.order_no,
+                item_id=request.item_id,
+                buyer_id=request.buyer_id,
+            )
+        except Exception as e:
+            amount_ok = False
+            logger.warning(f"【内部API】订单 {request.order_no} 发货前刷新金额异常: {e}")
+
+        if not amount_ok:
+            logger.warning(
+                f"【内部API】❌ 订单 {request.order_no} 发货前金额无效，禁止发货"
+            )
+            return {
+                "success": False,
+                "code": 400,
+                "message": "订单金额为0，发货前刷新订单详情失败，请稍后重试",
+                "data": None
+            }
         
         # 获取 WebSocket 连接
         ws = xianyu_live.ws
@@ -966,12 +1560,102 @@ async def deliver_order(request: DeliverOrderRequest):
                     "order_closed": pre_check['order_closed'],
                 },
             }
-        # card_only：跳过 confirm + 免拼接口，仅发卡券（订单已被卖家主动关闭）
-        skip_confirm_for_card_only = (pre_check_action == 'card_only')
+        # 关闭后补卡券与账号级“只发卡券”都跳过 confirm + 免拼，但落库语义不同。
+        closed_order_card_only = (pre_check_action == 'card_only')
+        try:
+            only_send_card_mode = db_manager.get_only_send_card(account_id)
+        except Exception as e:
+            only_send_card_mode = False
+            logger.warning(f"【内部API】获取只发卡券设置异常: {e}")
+        skip_shipping_confirm = closed_order_card_only or only_send_card_mode
+
+        # 同意后发货：开启且提货URL非空、且预检查允许发货时，
+        # 跳过确认发货/免拼/卡券，改为发送「通知信息+提货URL」提货消息。
+        # 成功返回 only_send_card=True，让定时补发货写防重复标记、保留平台待发货状态；
+        # 失败返回 success=False，留给下一轮补发货重试。
+        if pre_check_action == 'allow':
+            try:
+                agree_deliver_cfg = db_manager.get_agree_deliver_config(account_id)
+            except Exception as e:
+                agree_deliver_cfg = {"enabled": False, "notify_message": None, "pickup_url": None}
+                logger.warning(f"【内部API】获取同意后发货配置异常: {e}")
+            if bool(agree_deliver_cfg.get('enabled')) and (agree_deliver_cfg.get('pickup_url') or '').strip():
+                from common.utils.agree_deliver import build_agree_deliver_message, build_pickup_url
+                # 提货URL必须带上订单号与订单表主键；主键取不到就不发提货信息，
+                # 返回失败并写入失败原因，交给下一轮补发货重试。
+                order_pk = None
+                try:
+                    order_row = db_manager.get_order_by_id(request.order_no)
+                    order_pk = (order_row or {}).get('id')
+                except Exception as e:
+                    logger.warning(f"【内部API】查询订单主键异常: {e}")
+                if not order_pk:
+                    fail_reason = "同意后发货取不到订单主键，无法拼接提货URL"
+                    logger.error(f"【内部API】订单 {request.order_no} {fail_reason}")
+                    try:
+                        await xianyu_live.auto_delivery_handler._update_delivery_fail_reason(
+                            request.order_no, fail_reason
+                        )
+                    except Exception as e:
+                        logger.warning(f"【内部API】写同意后发货失败原因异常: {e}")
+                    return {
+                        "success": False,
+                        "code": 200,
+                        "message": "同意后发货：取不到订单主键，提货信息未发送",
+                        "data": None,
+                    }
+                pickup_text = build_agree_deliver_message(
+                    agree_deliver_cfg.get('notify_message'),
+                    build_pickup_url(agree_deliver_cfg.get('pickup_url'), request.order_no, order_pk),
+                )
+                logger.info(f"【内部API】订单 {request.order_no} 命中同意后发货，发送提货信息（不确认发货/不免拼/不发卡券）")
+                send_ok = await xianyu_live.auto_delivery_handler._send_text_with_separator(
+                    ws, request.chat_id, request.buyer_id, pickup_text,
+                    user_url=f'https://www.goofish.com/personal?userId={request.buyer_id}',
+                )
+                if send_ok:
+                    try:
+                        from common.services.order_service import OrderService
+                        async with async_session_maker() as db_session:
+                            await OrderService(db_session).record_card_only_delivery(
+                                order_no=request.order_no,
+                                delivery_method=request.delivery_method,
+                                delivery_content=pickup_text,
+                                # 优先取 pre_check 的昵称，规避并发下实例属性 _current_buyer_fish_nick 被覆盖
+                                buyer_fish_nick=pre_check.get('buyer_fish_nick') or xianyu_live.auto_delivery_handler._current_buyer_fish_nick,
+                            )
+                        logger.info(f"【内部API】订单 {request.order_no} 同意后发货完成，已写防重复标记（平台状态保持待发货）")
+                    except Exception as e:
+                        logger.error(f"【内部API】订单 {request.order_no} 同意后发货落库失败: {e}")
+                    return {
+                        "success": True,
+                        "code": 200,
+                        "message": "同意后发货：提货信息已发送",
+                        "data": {
+                            "order_no": request.order_no,
+                            "only_send_card": True,
+                            "content": pickup_text,
+                        },
+                    }
+                else:
+                    fail_reason = "同意后发货提货信息发送失败（已重试）"
+                    logger.error(f"【内部API】订单 {request.order_no} {fail_reason}")
+                    try:
+                        await xianyu_live.auto_delivery_handler._update_delivery_fail_reason(
+                            request.order_no, fail_reason
+                        )
+                    except Exception as e:
+                        logger.warning(f"【内部API】写同意后发货失败原因异常: {e}")
+                    return {
+                        "success": False,
+                        "code": 200,
+                        "message": "同意后发货：提货信息发送失败",
+                        "data": None,
+                    }
 
         # 检查是否开启"卡券发送成功再确认发货"模式
         send_before_confirm_mode = False
-        if not skip_confirm_for_card_only:
+        if not skip_shipping_confirm:
             try:
                 send_before_confirm_mode = db_manager.get_send_before_confirm(account_id)
             except Exception as e:
@@ -979,10 +1663,11 @@ async def deliver_order(request: DeliverOrderRequest):
 
         # 调用确认发货接口
         order_already_shipped = False  # 标记订单是否已发货
+        platform_shipping_confirmed = False  # 本次流程是否已经实际调用平台接口完成发货
 
-        if skip_confirm_for_card_only:
+        if skip_shipping_confirm:
             logger.info(
-                f"【内部API】card_only 模式：跳过确认发货 + 免拼接口，仅发送卡券: "
+                f"【内部API】只发卡券模式：跳过确认发货 + 免拼接口，仅发送卡券: "
                 f"order_no={request.order_no}"
             )
         elif send_before_confirm_mode:
@@ -1006,7 +1691,15 @@ async def deliver_order(request: DeliverOrderRequest):
                 item_id=request.item_id
             )
             
-            if confirm_result and confirm_result.get('success'):
+            if confirm_result and confirm_result.get('skipped_only_send_card'):
+                only_send_card_mode = True
+                skip_shipping_confirm = True
+                logger.info(
+                    f"【内部API】订单 {request.order_no} 处理期间开启了只发卡券，"
+                    f"确认发货已被拦截，继续发送卡券"
+                )
+            elif confirm_result and confirm_result.get('success'):
+                platform_shipping_confirmed = True
                 # 检查是否是"已发货成功"的响应
                 success_msg = confirm_result.get('message', '')
                 if 'ORDER_ALREADY_DELIVERY' in success_msg or '已发货成功' in success_msg:
@@ -1018,6 +1711,7 @@ async def deliver_order(request: DeliverOrderRequest):
                 error_msg = confirm_result.get('error', '未知错误') if confirm_result else '未知错误'
                 # 如果是已发货，也标记为已发货
                 if 'ORDER_ALREADY_DELIVERY' in error_msg or '已发货成功' in error_msg:
+                    platform_shipping_confirmed = True
                     logger.info(f"【内部API】订单 {request.order_no} 已发货过，只更新数据库状态，不再发送卡券")
                     order_already_shipped = True
                 else:
@@ -1038,7 +1732,7 @@ async def deliver_order(request: DeliverOrderRequest):
             logger.info(f"【内部API】自动确认发货已关闭，跳过确认发货")
 
         # 如果是小刀订单，调用免拼接口（card_only 模式和 send_before_confirm 模式下跳过）
-        if request.is_bargain and not order_already_shipped and not skip_confirm_for_card_only and not send_before_confirm_mode:
+        if request.is_bargain and not order_already_shipped and not skip_shipping_confirm and not send_before_confirm_mode:
             logger.info(f"【内部API】检测到小刀订单，调用免拼发货接口: order_no={request.order_no}")
             freeshipping_result = await xianyu_live.auto_delivery_handler.auto_freeshipping(
                 order_id=request.order_no,
@@ -1046,7 +1740,15 @@ async def deliver_order(request: DeliverOrderRequest):
                 buyer_id=request.buyer_id
             )
             
-            if freeshipping_result and freeshipping_result.get('success'):
+            if freeshipping_result and freeshipping_result.get('skipped_only_send_card'):
+                only_send_card_mode = True
+                skip_shipping_confirm = True
+                logger.info(
+                    f"【内部API】订单 {request.order_no} 处理期间开启了只发卡券，"
+                    f"免拼发货已被拦截，继续发送卡券"
+                )
+            elif freeshipping_result and freeshipping_result.get('success'):
+                platform_shipping_confirmed = True
                 # 检查是否是"已发货成功"的响应
                 success_msg = freeshipping_result.get('message', '')
                 if 'ORDER_ALREADY_DELIVERY' in success_msg or '已发货成功' in success_msg:
@@ -1058,6 +1760,7 @@ async def deliver_order(request: DeliverOrderRequest):
                 error_msg = freeshipping_result.get('error', '未知错误') if freeshipping_result else '未知错误'
                 # 如果是已发货，也标记为已发货
                 if 'ORDER_ALREADY_DELIVERY' in error_msg or '已发货成功' in error_msg:
+                    platform_shipping_confirmed = True
                     logger.info(f"【内部API】订单 {request.order_no} 免拼已发货过，只更新数据库状态，不再发送卡券")
                     order_already_shipped = True
                 else:
@@ -1131,7 +1834,7 @@ async def deliver_order(request: DeliverOrderRequest):
         #      并触发 backend-web 抛 HTTPException 500；
         #   3) is_card_only=True 已让调用方跳过 status='shipped' 强制覆盖；
         #   4) skipped_due_to_dock_card=True 让调用方区分"卡券实际未发送"的特殊场景。
-        if skip_confirm_for_card_only and card_source in ('dock_l1', 'dock_l2'):
+        if closed_order_card_only and card_source in ('dock_l1', 'dock_l2'):
             logger.warning(
                 f"【内部API】card_only 模式 + 对接卡券：跳过卡券发送（订单已被关闭，避免货主财务损失），"
                 f"order_no={request.order_no}, card_source={card_source}"
@@ -1165,7 +1868,7 @@ async def deliver_order(request: DeliverOrderRequest):
                 logger.warning(f"【内部API】对接卡券发货校验未通过: order_no={request.order_no}, card_source={card_source}, 原因={fail_reason}")
                 # 将失败原因写入订单表
                 # card_only 模式：pre_check 已写入"禁止发货原因"（更精确），不要被对接校验失败原因覆盖
-                if skip_confirm_for_card_only:
+                if closed_order_card_only:
                     logger.info(
                         f"【内部API】card_only 模式且对接卡券校验失败：保留 pre_check 写入的禁止发货原因，"
                         f"不覆盖。order_no={request.order_no}"
@@ -1198,7 +1901,7 @@ async def deliver_order(request: DeliverOrderRequest):
         # 多数量场景下 N 倍补发会让货主多承担 N-1 张卡密成本（特别是 data/api 实际卡密会扣库存/调 API）。
         # card_only 流程下强制 quantity=1（业务上 card_only 就是补 1 张），调用方收到的 is_card_only=True
         # 已经隐含了"就 1 张"语义，不再单独加退化标记字段。
-        if quantity > 1 and skip_confirm_for_card_only:
+        if quantity > 1 and closed_order_card_only:
             logger.warning(
                 f"【内部API】订单 {request.order_no} card_only 模式仅补发 1 张固定卡券，"
                 f"已退化为 1 张（quantity={quantity} -> 1）"
@@ -1481,6 +2184,25 @@ async def deliver_order(request: DeliverOrderRequest):
         except Exception as wait_err:
             logger.warning(f"【内部API】等待卡券服务端回执失败（不影响发货主流程）: {wait_err}")
 
+        # 发卡期间若刚开启只发卡券，必须覆盖 send_before_confirm，禁止后置确认发货。
+        if not only_send_card_mode and not platform_shipping_confirmed:
+            try:
+                only_send_card_mode = db_manager.get_only_send_card(account_id)
+                if only_send_card_mode:
+                    skip_shipping_confirm = True
+                    send_before_confirm_mode = False
+                    logger.info(
+                        f"【内部API】订单 {request.order_no} 发卡期间开启了只发卡券，"
+                        f"跳过后置确认发货"
+                    )
+            except Exception as e:
+                logger.warning(f"【内部API】发卡后复查只发卡券设置异常: {e}")
+        elif platform_shipping_confirmed:
+            logger.info(
+                f"【内部API】订单 {request.order_no} 已在本次流程完成平台发货，"
+                f"即使账号设置随后变化也按已发货结果落库"
+            )
+
         # ============ "卡券发送成功再确认发货"模式：卡券已发送，现在执行确认发货 ============
         send_before_confirm_fail_msg: str | None = None
         if send_before_confirm_mode and send_success_count > 0 and send_failed_count == 0 and not card_intercept_reason:
@@ -1494,22 +2216,40 @@ async def deliver_order(request: DeliverOrderRequest):
                         item_id=request.item_id,
                         buyer_id=request.buyer_id
                     )
-                    if freeshipping_result and freeshipping_result.get('success'):
+                    if freeshipping_result and freeshipping_result.get('skipped_only_send_card'):
+                        only_send_card_mode = True
+                        skip_shipping_confirm = True
+                        send_before_confirm_mode = False
+                        logger.info(
+                            f"【内部API】订单 {request.order_no} 后置免拼发货已被只发卡券开关拦截"
+                        )
+                    elif freeshipping_result and freeshipping_result.get('success'):
+                        platform_shipping_confirmed = True
                         logger.info(f"【内部API】卡券发送后免拼发货成功: order_no={request.order_no}")
                     else:
                         fs_error = freeshipping_result.get('error', '未知错误') if freeshipping_result else '未知错误'
                         logger.warning(f"【内部API】卡券发送后免拼发货失败: {fs_error}，order_no={request.order_no}")
 
-                confirm_result = await xianyu_live.auto_delivery_handler.auto_confirm(
-                    order_id=request.order_no,
-                    item_id=request.item_id
-                )
-                if confirm_result and confirm_result.get('success'):
-                    logger.info(f"【内部API】🎉 卡券发送后确认发货成功: order_no={request.order_no}")
-                else:
-                    confirm_error = confirm_result.get('error', '未知错误') if confirm_result else '未知错误'
-                    send_before_confirm_fail_msg = f"⚠️ 卡券已发送成功，但确认发货失败: {confirm_error}，请手动确认发货"
-                    logger.warning(f"【内部API】{send_before_confirm_fail_msg}，order_no={request.order_no}")
+                if not only_send_card_mode:
+                    confirm_result = await xianyu_live.auto_delivery_handler.auto_confirm(
+                        order_id=request.order_no,
+                        item_id=request.item_id
+                    )
+                    if confirm_result and confirm_result.get('skipped_only_send_card'):
+                        only_send_card_mode = True
+                        skip_shipping_confirm = True
+                        send_before_confirm_mode = False
+                        logger.info(
+                            f"【内部API】订单 {request.order_no} 后置确认发货已被只发卡券开关拦截，"
+                            f"按只发卡券结果落库"
+                        )
+                    elif confirm_result and confirm_result.get('success'):
+                        platform_shipping_confirmed = True
+                        logger.info(f"【内部API】🎉 卡券发送后确认发货成功: order_no={request.order_no}")
+                    else:
+                        confirm_error = confirm_result.get('error', '未知错误') if confirm_result else '未知错误'
+                        send_before_confirm_fail_msg = f"⚠️ 卡券已发送成功，但确认发货失败: {confirm_error}，请手动确认发货"
+                        logger.warning(f"【内部API】{send_before_confirm_fail_msg}，order_no={request.order_no}")
             else:
                 send_before_confirm_fail_msg = "⚠️ 卡券已发送成功，但自动确认发货已关闭，请手动确认发货"
                 logger.info(f"【内部API】自动确认发货已关闭，卡券已发送但跳过确认发货: order_no={request.order_no}")
@@ -1544,7 +2284,7 @@ async def deliver_order(request: DeliverOrderRequest):
             not quantity_degraded_for_dock
             and not quantity_degraded_for_fixed_content
             and not quantity_degraded_for_disabled_switch
-            and not skip_confirm_for_card_only
+            and not closed_order_card_only
         ):
             warn_parts: list[str] = []
             if actual_count < requested_quantity:
@@ -1576,11 +2316,19 @@ async def deliver_order(request: DeliverOrderRequest):
             else intercept_warn_msg
         )
 
+        # 后置确认结束到落库之间仍可能切换开关，最终再读一次，避免把未确认平台发货的订单写成 shipped。
+        if not only_send_card_mode and not platform_shipping_confirmed:
+            try:
+                only_send_card_mode = db_manager.get_only_send_card(account_id)
+            except Exception as e:
+                logger.warning(f"【内部API】落库前复查只发卡券设置异常: {e}")
+        only_send_card_result = only_send_card_mode and not platform_shipping_confirmed
+
         try:
             from common.services.order_service import OrderService
             async with async_session_maker() as db_session:
                 order_service = OrderService(db_session)
-                if skip_confirm_for_card_only:
+                if closed_order_card_only:
                     await order_service.record_delivery_for_closed_order(
                         order_no=request.order_no,
                         delivery_method=request.delivery_method,
@@ -1589,6 +2337,17 @@ async def deliver_order(request: DeliverOrderRequest):
                     )
                     logger.info(
                         f"【内部API】订单 {request.order_no} card_only 模式：已记录补发卡券内容（订单状态保持已关闭，共 {actual_count} 张）"
+                    )
+                elif only_send_card_result:
+                    await order_service.record_card_only_delivery(
+                        order_no=request.order_no,
+                        delivery_method=request.delivery_method,
+                        delivery_content=combined_content,
+                        buyer_fish_nick=xianyu_live.auto_delivery_handler._current_buyer_fish_nick,
+                    )
+                    logger.info(
+                        f"【内部API】订单 {request.order_no} 只发卡券完成，"
+                        f"已写入防重复标记，平台订单状态保持不变（共 {actual_count} 张）"
                     )
                 else:
                     await order_service.update_order_delivery_info(
@@ -1659,17 +2418,19 @@ async def deliver_order(request: DeliverOrderRequest):
                 f"（订单数量为 {request.quantity} 张）。如需多数量发送不同卡密，请改用 data 或 api 类型卡券"
             )
         elif card.type == 'image':
-            success_msg = (
-                f"图片发货成功（共 {actual_count} 张）"
-                if not skip_confirm_for_card_only
-                else f"card_only 模式：仅补发图片卡券（共 {actual_count} 张），订单已被关闭"
-            )
+            if only_send_card_result:
+                success_msg = f"只发卡券成功：已发送图片卡券（共 {actual_count} 张），平台订单保持待发货"
+            elif closed_order_card_only:
+                success_msg = f"card_only 模式：仅补发图片卡券（共 {actual_count} 张），订单已被关闭"
+            else:
+                success_msg = f"图片发货成功（共 {actual_count} 张）"
         else:
-            success_msg = (
-                f"发货成功（共 {actual_count} 张）"
-                if not skip_confirm_for_card_only
-                else f"card_only 模式：仅补发卡券内容（共 {actual_count} 张），订单已被关闭"
-            )
+            if only_send_card_result:
+                success_msg = f"只发卡券成功：已发送卡券内容（共 {actual_count} 张），平台订单保持待发货"
+            elif closed_order_card_only:
+                success_msg = f"card_only 模式：仅补发卡券内容（共 {actual_count} 张），订单已被关闭"
+            else:
+                success_msg = f"发货成功（共 {actual_count} 张）"
 
         # 在 success_msg 末尾追加部分异常说明（库存不足 / 发送失败），让前端调用方一眼看到
         if partial_warn_msg:
@@ -1708,7 +2469,8 @@ async def deliver_order(request: DeliverOrderRequest):
             "content": combined_content,
             "delivery_method": request.delivery_method,
             # is_card_only=True 告知调用方：订单已被关闭，调用方不要再把本地状态改为 'shipped'
-            "is_card_only": skip_confirm_for_card_only,
+            "is_card_only": closed_order_card_only,
+            "only_send_card": only_send_card_result,
             # 多数量发货：本次实际成功发出的张数（可能 < quantity，例如 data/api 中途耗尽）
             "quantity_requested": requested_quantity,
             "quantity_sent": actual_count,
@@ -2093,13 +2855,13 @@ async def _standalone_password_login(account_id: str, trigger_reason: str) -> di
                     from sqlalchemy import text
                     unb = result.get('unb', '')
                     if unb:
-                        async with async_session_maker() as session:
-                            await session.execute(
-                                text("DELETE FROM xy_token_cache WHERE user_id = :user_id"),
-                                {"user_id": unb}
-                            )
-                            await session.commit()
-                            logger.info(f"【内部API】已清除Token缓存: user_id={unb}")
+                        invalidation = await mark_token_cache_expired(
+                            token_user_id=unb,
+                            invalidate_valid_cache=True,
+                        )
+                        logger.info(
+                            f"【内部API】{invalidation.message}: user_id={unb}"
+                        )
                 except Exception as cache_e:
                     logger.warning(f"【内部API】清除Token缓存失败: {cache_e}")
                 

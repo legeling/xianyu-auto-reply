@@ -15,6 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.system_setting import SystemSetting
+from common.services.remote_token_api import (
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    TOKEN_REMOTE_URL_SETTING_KEY,
+)
+from common.services.token_api_mode import (
+    TOKEN_API_MODE_SETTING_KEY,
+    normalize_token_api_mode,
+)
 from common.utils.text_utils import escape_xss
 
 # 安全（M2 修复）：敏感设置分级管理
@@ -24,6 +32,7 @@ from common.utils.text_utils import escape_xss
 #    管理员密码哈希由专用改密接口管理）。
 PROTECTED_KEYS = {
     "security.jwt_secret_key",
+    "security.internal_api_token",
     "admin_password_hash",
 }
 
@@ -39,6 +48,8 @@ SENSITIVE_KEYS = {
     "smtp_password",
     # 远程过滑块共享密钥（外部服务凭它调用本机过滑块接口）
     "captcha.remote_secret_key",
+    "password_login.remote_secret_key",
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
 }
 
 # GET 脱敏占位符：前端设置页会将该占位符原样提交回来，PUT 端识别后忽略不更新
@@ -92,13 +103,22 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
     "captcha.real_mouse_weight_local": ("1", "real_mouse过滑块本地排队权重"),
     "captcha.real_mouse_weight_remote": ("1", "real_mouse过滑块远程排队权重"),
     "captcha.block_remote_calls": ("true", "是否禁止外部远程调用backend-web过滑块接口"),
-    "captcha.local_slider_disabled": ("false", "本机滑块是否停止处理并仅使用Token缓存"),
+    "captcha.local_slider_disabled": (
+        "false",
+        "本机是否停止处理滑块；缓存缺失时仍请求Token接口",
+    ),
     "captcha.remote_processing_max": ("20", "远程调用允许的最大处理中滑块日志数，0=不限制"),
     "captcha.remote_cooldown_seconds": ("600", "远程调用达到处理中上限后的冷却秒数，0=不冷却"),
     "captcha.remote_cooldown_until": ("0", "远程过滑块调用冷却截止时间戳"),
     "captcha.slider_mode": ("browser", "滑块滑动方式：browser/real_mouse"),
     # 账号密码登录模式：protocol-协议登录 / browser-浏览器登录
     "password_login.mode": ("browser", "账号密码登录模式：protocol/browser"),
+    "password_login.remote_url": ("", "协议登录远程接口URL"),
+    "password_login.remote_secret_key": ("", "协议登录远程接口秘钥"),
+    # Token获取方式：web-网页接口 / remote-远程接口
+    "token.api_mode": ("web", "Token获取方式：web-网页接口/remote-远程接口"),
+    "token.remote_url": ("", "Token远程接口URL"),
+    "token.remote_secret_key": ("", "Token远程接口秘钥"),
 }
 
 # 不需要XSS转义的键（布尔值、数字等）
@@ -141,6 +161,8 @@ NO_ESCAPE_KEYS = {
     # 远程过滑块配置：URL 含 :// 等字符、秘钥为随机串，均不能被 XSS 转义
     "captcha.remote_service_url",
     "captcha.remote_secret_key",
+    "password_login.remote_secret_key",
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
     # 是否传递账号Cookie：布尔字符串"true"/"false"，无需转义
     "captcha.remote_pass_cookies",
     "captcha.block_remote_calls",
@@ -154,6 +176,16 @@ NO_ESCAPE_KEYS = {
     "captcha.real_mouse_weight_remote",
     # 账号密码登录模式：枚举字符串，无需转义
     "password_login.mode",
+    # 协议登录远程接口配置：URL 和秘钥不能被 XSS 转义
+    "password_login.remote_url",
+    "password_login.remote_secret_key",
+    # Token获取方式：枚举字符串，无需转义
+    "token.api_mode",
+    # Token远程接口配置：URL 和秘钥不能被 XSS 转义
+    TOKEN_REMOTE_URL_SETTING_KEY,
+    TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    # 服务间令牌不会经由通用设置接口写入；加入免转义集合，防止内部维护时被破坏。
+    "security.internal_api_token",
 }
 
 
@@ -204,6 +236,10 @@ class SystemSettingService:
         settings["captcha.slider_mode"] = (
             slider_mode if slider_mode in {"browser", "real_mouse"} else "browser"
         )
+        # Token获取方式：非法值统一回落到默认的网页接口
+        settings[TOKEN_API_MODE_SETTING_KEY] = normalize_token_api_mode(
+            settings.get(TOKEN_API_MODE_SETTING_KEY)
+        )
         return settings
 
     async def set_setting(self, key: str, value: str, description: str | None = None) -> None:
@@ -231,6 +267,13 @@ class SystemSettingService:
 
         self.session.add(record)
         await self.session.commit()
+
+    async def resolve_sensitive_value(self, key: str, value: str) -> str:
+        """接口测试沿用已保存的密钥，不能把页面脱敏占位符发给远程服务。"""
+        if key not in SENSITIVE_KEYS or value != SENSITIVE_MASK:
+            return value
+        result = await self.session.execute(select(SystemSetting.value).where(SystemSetting.key == key))
+        return result.scalar_one_or_none() or ""
 
     async def set_settings(self, settings: Dict[str, tuple[str, str | None]]) -> None:
         """在同一事务中批量保存系统设置。

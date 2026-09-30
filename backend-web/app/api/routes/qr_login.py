@@ -185,7 +185,7 @@ async def get_qr_status(
                     # 调用 WebSocket 服务启动账号任务
                     try:
                         from app.core.config import get_settings
-                        from common.utils.internal_auth import build_internal_headers
+                        from common.utils.internal_auth import build_internal_auth_headers
                         settings = get_settings()
                         client = get_http_client()
 
@@ -195,7 +195,7 @@ async def get_qr_status(
                             "user_id": owner_id
                         }
                         # 内部接口鉴权头（X-Internal-Token 共享密钥）
-                        internal_headers = build_internal_headers(settings)
+                        internal_headers = build_internal_auth_headers(settings.internal_api_token)
 
                         if is_new_account:
                             # 新账号：启动任务

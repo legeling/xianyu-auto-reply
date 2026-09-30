@@ -81,8 +81,16 @@ git push origin dev
 1. **我方删除的，不同步回来**：凡本清单中"移除"类定制，上游对应的新增/修改在冲突时一律以我方删除为准。
 2. **上游新增的独立功能，正常吸收**：与定制无关的新功能（如弹窗公告、用户到期设置）照常合入；若与已移除模块有挂载关系（如弹窗公告原挂在"广告"菜单下），将其改挂到独立位置而非随菜单一并删除。
 3. **同一处的双方修改，取并集**：如设置项过滤列表、`.gitignore`，双方各自新增的条目都保留。
-4. **合并后必须验证**：前端 `cd frontend && npx tsc --noEmit` 通过、后端 `python -m compileall backend-web/app common` 通过、无残留引用（`grep -rn "advertisement" frontend/src backend-web/app common` 无意外命中）后才提交合并。
+4. **合并后必须验证**：前端 `pnpm --dir frontend exec tsc --noEmit` 通过、后端通过 `uv run --no-sync python -m compileall backend-web/app common` 编译检查、无残留引用（`rg "advertisement" frontend/src backend-web/app common` 无意外命中）后才提交合并。
 5. **新定制要登记**：今后再移除或重写上游功能时，同步把保护规则追加到上表。
+
+### 2.2 鉴权和移动端同步约定
+
+- 服务间鉴权统一复用 `common/utils/internal_auth.py`；共享 HTTP 客户端负责为受信任的 `/internal` 请求加入令牌，直接 HTTP 调用与 `/password-login` 调用显式使用同一请求头构造函数。
+- 内部令牌由 `common/utils/internal_token_service.py` 持久化，保护键加入 `PROTECTED_KEYS`，不要合入两套鉴权依赖或在通用设置 API 暴露令牌。
+- 既有部署脚本生成 24 位随机令牌，最低有效长度由 `MIN_INTERNAL_TOKEN_LENGTH` 统一定义；升级时不得无故使现有部署失效。
+- `xianyu-mobile` 的广告页面、导航、API 包装及生成的端点快照同样遵循移除广告约定；公告入口独立保留。
+- 前端验证使用 pnpm，Python 验证使用 uv，优先复用现有依赖与缓存。
 
 ### 3. 发布 / 上线
 

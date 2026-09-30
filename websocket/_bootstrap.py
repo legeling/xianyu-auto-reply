@@ -24,9 +24,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.core.config import get_settings
+from common.services.captcha.slider_mode import refresh_slider_mode_from_database
+from common.services.risk_control_log_cleanup_service import (
+    fail_processing_risk_control_logs_on_restart,
+)
 from common.utils.logging_utils import setup_logging
 from common.utils.network_utils import resolve_listen_host
-from common.services.captcha.slider_mode import refresh_slider_mode_from_database
 
 faulthandler.enable()
 
@@ -73,6 +76,23 @@ async def lifespan(app: FastAPI):
     if not await check_database_connection():
         logger.error("数据库连接失败，服务退出")
         sys.exit(1)
+
+    # 只读取 backend 已准备好的服务间 API 令牌，WebSocket 不负责数据库初始化。
+    try:
+        from common.utils.internal_token_service import load_internal_api_token
+        await load_internal_api_token(settings)
+    except Exception as e:
+        logger.error(f"内部 API 令牌加载失败: {e}")
+        raise
+
+    cleanup_result = await fail_processing_risk_control_logs_on_restart()
+    if not cleanup_result.success:
+        logger.error(cleanup_result.message)
+        raise RuntimeError(cleanup_result.message)
+    if cleanup_result.updated_count:
+        logger.warning(cleanup_result.message)
+    else:
+        logger.info(cleanup_result.message)
 
     await refresh_slider_mode_from_database()
     
@@ -198,4 +218,6 @@ def run_server():
         port=settings.service_port,
         reload=False,
         log_level=settings.log_level.lower(),
+        # 保留公共日志工具配置，确保 Uvicorn 日志也进入普通日志和 error.log。
+        log_config=None,
     )

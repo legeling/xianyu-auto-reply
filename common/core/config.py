@@ -74,11 +74,8 @@ class BaseConfig(BaseSettings):
     access_token_expire_minutes: int = Field(default=30)
     refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
 
-    # 服务间内部接口共享密钥（X-Internal-Token）：保护 /internal/*、/password-login
-    # 等内部接口。所有服务必须配置相同的值（环境变量 INTERNAL_API_TOKEN）。
-    # 安全策略为 fail-closed：未配置时内部接口拒绝所有请求（503），详见
-    # common/utils/internal_auth.py。
-    internal_api_token: str | None = Field(default=None, repr=False)
+    # 服务间调用 /internal 接口使用的共享令牌；留空时由启动流程从数据库自动加载或生成。
+    internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN", repr=False)
 
     # 服务监听地址：`::` 同时监听 IPv4 和 IPv6（dual-stack），
     # 适用于 Linux/macOS；如需仅监听 IPv4 可设为 0.0.0.0
@@ -90,6 +87,10 @@ class BaseConfig(BaseSettings):
     # 数据库备份文件目录（Docker 环境通过共享卷挂载，本地回退到 backups）
     # 通过环境变量 BACKUP_DIR 配置，禁止写死 localhost / 绝对路径
     backup_dir: str = Field(default="backups", alias="BACKUP_DIR")
+
+    # 静态文件目录（Docker 环境通过共享卷挂载，本地回退到 static）
+    # 通过环境变量 STATIC_DIR 配置，禁止写死绝对路径
+    static_dir: str = Field(default="static", alias="STATIC_DIR")
 
     # IM Token 缓存（xy_token_cache 表）的基础随机过期时间区间（小时）。
     # 基础 TTL 取值后还会追加 1~5 小时的秒级随机偏移，进一步分散到期时间。
