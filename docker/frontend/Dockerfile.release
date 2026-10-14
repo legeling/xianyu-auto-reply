@@ -1,0 +1,10 @@
+# frontend/dist 必须先用 pnpm build 生成；复用现有 Nginx 运行环境。
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER root
+RUN rm -rf /usr/share/nginx/html/*
+COPY frontend/dist /usr/share/nginx/html
+COPY docker/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+USER 101
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/ || exit 1

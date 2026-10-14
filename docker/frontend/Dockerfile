@@ -4,24 +4,24 @@
 
 # ====== 第一阶段：构建 ======
 # 基础镜像走 docker.io 官方名（由 buildx 的 buildkitd 镜像加速配置拉取，见流水线 BUILDKIT 配置）
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 # 配置国内镜像源
-RUN npm config set registry https://registry.npmmirror.com
+RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
 
 WORKDIR /app
 
 # 复制依赖文件
-COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
 
 # 使用锁文件进行确定性安装
-RUN npm ci --no-audit --no-fund
+RUN pnpm install --frozen-lockfile
 
 # 复制源代码
 COPY frontend/ .
 
 # 构建生产版本（前端API已使用相对路径/api/v1，通过nginx反向代理到后端）
-RUN npm run build
+RUN pnpm build
 
 # ====== 第二阶段：运行 ======
 # 使用非 root 的 nginx-unprivileged 镜像（容器内以 uid 101 运行，监听非特权端口 8080）
@@ -41,6 +41,6 @@ ENV TZ=Asia/Shanghai
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/ || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

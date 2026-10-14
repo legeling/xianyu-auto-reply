@@ -6,7 +6,7 @@
 用户只需修改其中的值即可。
 
 自动生成的配置文件：
-- data/update_config.json  在线更新服务器地址
+本分支不再生成上游自动更新配置；已有历史文件保持原样。
 """
 import json
 import sys
@@ -23,11 +23,7 @@ def _get_data_dir() -> Path:
 
 
 # 需要自动生成的配置文件及其默认内容
-_CONFIG_TEMPLATES = {
-    "update_config.json": {
-        "update_url": "https://xy-update.zhinianboke.com"
-    },
-}
+_CONFIG_TEMPLATES = {}
 
 
 def init_config_files():

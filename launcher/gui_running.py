@@ -444,7 +444,7 @@ def _show_update_result(app, btn, result):
 
     if not result["has_update"]:
         messagebox.showinfo("检查更新",
-                            f"当前已是最新版本 v{CURRENT_VERSION}")
+                            result["description"])
         return
 
     # 有新版本，弹出确认对话框

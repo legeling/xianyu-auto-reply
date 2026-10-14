@@ -1,0 +1,18 @@
+# 复用已部署服务的完整运行环境，只替换代码并补齐声明依赖。
+# BASE_IMAGE 必须是当前主机保留的明确镜像标签，不使用上游 latest。
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG SERVICE
+USER root
+COPY release/tools/uv /usr/local/bin/uv
+ENV UV_NO_CACHE=1
+RUN rm -rf /app/common /app/launcher /app/${SERVICE}
+COPY --chown=app:app common /app/common
+COPY --chown=app:app launcher /app/launcher
+COPY --chown=app:app ${SERVICE} /app/${SERVICE}
+RUN uv pip install --system --python /usr/local/bin/python -r /app/${SERVICE}/pyproject.toml \
+    && uv pip check --python /usr/local/bin/python
+USER app
+ENV XIANYU_SERVICE=${SERVICE}
+CMD ["sh", "-c", "exec uv run --no-project --no-python-downloads --python /usr/local/bin/python /usr/local/bin/python /app/${XIANYU_SERVICE}/main.py"]
+# 端口和浏览器目录沿用对应服务的已部署镜像。

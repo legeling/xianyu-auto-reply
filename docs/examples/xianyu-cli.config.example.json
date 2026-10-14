@@ -1,0 +1,11 @@
+{
+  "base_url": "http://127.0.0.1:8089",
+  "token": "",
+  "refresh_token": "",
+  "user": {
+    "user_id": null,
+    "username": "example-user",
+    "is_admin": false,
+    "account_limit": null
+  }
+}

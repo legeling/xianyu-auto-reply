@@ -108,6 +108,18 @@
 
 本仓库的上游为 [zhinianboke/xianyu-auto-reply](https://github.com/zhinianboke/xianyu-auto-reply)。分支模型（`main` 稳定基线 / `dev` 日常开发 / `feature/*` 短期功能）与上游同步流程见 [BRANCHING.md](BRANCHING.md)。
 
+### 独立版本与生产更新
+
+本分支的产品版本唯一来源是 `common/version.py`，本次独立发布为 **1.1.4**。`UPSTREAM_VERSION` / `UPSTREAM_COMMIT` 记录已合入上游 **1.0.10** 的来源；合入上游时不直接采用其产品版本号。Web 与启动器共用本分支版本；Python 包、服务协议及前端 package.json 的版本不作为产品发布号。
+
+`GET /api/v1/version/current` 返回 `version`、`upstream_version`、`upstream_commit`；`/version/check` 返回本分支发布说明，不请求上游更新服务器。桌面端不再下载安装上游发布包，避免覆盖本地定制。后续产品发布仅递增 `CURRENT_VERSION`，同步更新发布说明并重新构建部署。
+
+已有 Docker 部署可使用 `docker/python/Dockerfile.release` 和 `docker/frontend/Dockerfile.release`：先核对并标记旧镜像，复用其已安装的 Python、依赖和 Chromium；Python 依赖通过 uv 补齐，前端在已有环境用 `pnpm --dir frontend build` 生成 `frontend/dist`。构建上下文 `release/tools/uv` 使用目标主机现有 Linux uv。镜像必须使用带产品版本及源码摘要的唯一标签，构建时保留旧服务，镜像验证后再切换四个应用容器。保留原 Compose 的网络、卷、端口和凭据，MySQL / Redis 无需更换。
+
+数据库通过 `common/db/migrations/` 按编号升级，成功记录在 `xy_schema_migrations`；失败不记版本，修复后重复执行。迁移 001 收敛上游已有幂等升级逻辑，并检查实际表和字段。已有管理员改名不会重新生成默认管理员。部署前必须用旧库副本核对用户、账号、商品、设置与数量，复跑确认幂等，再验证副本备份可恢复；生产切换前停止应用写入并备份完整数据库、静态资源及浏览器数据。
+
+回滚时停止四个应用容器，恢复部署前的 Compose、环境文件及旧镜像标签，再启动。若数据库变更影响旧版本，先恢复停写后的完整数据库备份；升级后新增业务数据须先另行导出，禁止直接覆盖。备份文件含凭据，只允许所有者读取。历史 `data/update_config.json` 不再参与本分支升级，恢复上游自动更新不属于回滚步骤。
+
 ## 项目结构
 
 ```text
@@ -352,8 +364,9 @@ xianyu_cli/
 ├── main.py              # xianyu-cli 入口
 └── commands/            # 按功能拆分的命令模块
     ├── accounts.py      # 账号快捷命令
-    ├── auth.py          # 登录、token 和当前用户
+    ├── auth.py          # 登录、令牌刷新、token 和当前用户
     ├── items.py         # 商品快捷查询
+    ├── publish.py       # 素材、发布能力、单品/批量上架和结果查询
     ├── orders.py        # 订单快捷查询
     ├── settings.py      # 系统设置快捷命令
     ├── web.py           # 按网页版页面浏览、覆盖检查和调用 API
@@ -363,46 +376,91 @@ xianyu_cli/
 
 ```bash
 # 在项目根目录执行
-python scripts/xianyu_cli.py config set-url http://127.0.0.1:8089
+uv run --no-project --python 3.12 scripts/xianyu_cli.py config set-url http://127.0.0.1:8089
 
 # 检查后端地址、健康检查、OpenAPI 和 token 是否可用
-python scripts/xianyu_cli.py doctor
+uv run --no-project --python 3.12 scripts/xianyu_cli.py doctor
 
 # 也可以离线读取本地 OpenAPI JSON 做接口审计
-python scripts/xianyu_cli.py --openapi-file ./openapi.json web coverage
+uv run --no-project --python 3.12 scripts/xianyu_cli.py --openapi-file ./openapi.json web coverage
 
 # 登录后会把 token 保存到 ~/.xianyu-auto-reply-cli.json
-python scripts/xianyu_cli.py auth login -u admin
+uv run --no-project --python 3.12 scripts/xianyu_cli.py auth login -u admin
 
 # 查看当前登录用户
-python scripts/xianyu_cli.py auth whoami
+uv run --no-project --python 3.12 scripts/xianyu_cli.py auth whoami
 
 # 常用查询
-python scripts/xianyu_cli.py health
-python scripts/xianyu_cli.py accounts list --page-size 50
-python scripts/xianyu_cli.py items list --account-id <账号ID>
-python scripts/xianyu_cli.py orders --search <订单号或商品ID>
-python scripts/xianyu_cli.py keywords --account-id <账号ID>
+uv run --no-project --python 3.12 scripts/xianyu_cli.py health
+uv run --no-project --python 3.12 scripts/xianyu_cli.py accounts list --page-size 50
+uv run --no-project --python 3.12 scripts/xianyu_cli.py items list --account-id <账号ID>
+uv run --no-project --python 3.12 scripts/xianyu_cli.py orders --search <订单号或商品ID>
+uv run --no-project --python 3.12 scripts/xianyu_cli.py keywords --account-id <账号ID>
 
 # 常用操作
-python scripts/xianyu_cli.py accounts disable <账号ID>
-python scripts/xianyu_cli.py accounts enable <账号ID>
-python scripts/xianyu_cli.py accounts remark <账号ID> "备用账号"
+uv run --no-project --python 3.12 scripts/xianyu_cli.py accounts disable <账号ID>
+uv run --no-project --python 3.12 scripts/xianyu_cli.py accounts enable <账号ID>
+uv run --no-project --python 3.12 scripts/xianyu_cli.py accounts remark <账号ID> "备用账号"
 
 # Cookie 较长时建议从 stdin 输入
-pbpaste | python scripts/xianyu_cli.py accounts cookie <账号ID>
+pbpaste | uv run --no-project --python 3.12 scripts/xianyu_cli.py accounts cookie <账号ID>
 
 # 兜底：直接调用任意 backend-web API
-python scripts/xianyu_cli.py api GET /api/v1/system-settings
-python scripts/xianyu_cli.py api PUT /api/v1/system-settings/registration_enabled -d '{"value":"false"}'
+uv run --no-project --python 3.12 scripts/xianyu_cli.py api GET /api/v1/system-settings
+uv run --no-project --python 3.12 scripts/xianyu_cli.py api PUT /api/v1/system-settings/registration_enabled -d '{"value":"false"}'
 
 # 文件上传、导入和导出也走同一套调用能力
-python scripts/xianyu_cli.py api POST /api/v1/upload/upload-image -F image=./card.png
-python scripts/xianyu_cli.py api POST /api/v1/cookies/import -F file=./accounts.xlsx -f enable_all=true
-python scripts/xianyu_cli.py api POST /api/v1/cookies/export -d '{}' -o ./accounts_export.xlsx
+uv run --no-project --python 3.12 scripts/xianyu_cli.py api POST /api/v1/upload/upload-image -F image=./card.png
+uv run --no-project --python 3.12 scripts/xianyu_cli.py api POST /api/v1/cookies/import -F file=./accounts.xlsx -f enable_all=true
+uv run --no-project --python 3.12 scripts/xianyu_cli.py api POST /api/v1/cookies/export -d '{}' -o ./accounts_export.xlsx
 ```
 
+完整的上架、发货配置、卡券库存、订单与自动发货日志流程见 [CLI经营操作手册](docs/cli-operations.md)。新增命令仅调用已有后端接口；没有在 CLI 中另建发货定时器、任务队列或重复提交策略。1.1.2 同时修复单个/批量新建卡券时 `enabled=false` 被覆盖的问题。
+
 `features` 和 `routes` 命令会读取后端 `/openapi.json`。`features` 按网页版功能模块分组，适合日常使用；`routes` 保留原始 OpenAPI 视角，适合精确排查。
+
+#### CLI 自动化发布
+
+CLI 本身仅依赖 Python 标准库，可以通过 `uv run --no-project --python 3.12 scripts/xianyu_cli.py` 复用已有 Python 3.12，无需安装整个后端。以下 shell 函数用于缩短命令，须在仓库根目录执行：
+
+```bash
+xianyu-cli() { uv run --no-project --python 3.12 scripts/xianyu_cli.py "$@"; }
+
+xianyu-cli config set-url https://your-domain.example
+xianyu-cli auth login -u automation
+xianyu-cli auth whoami
+# refresh token 仍有效时可更新登录态；已失效则需要重新登录。
+xianyu-cli auth refresh
+xianyu-cli accounts list
+```
+
+后台用户登录和闲鱼账号登录是两个步骤。后台用户登录后，可以通过 `accounts create` / `accounts cookie` 导入合法 Cookie，或通过 `api POST /api/v1/qr-login/generate` 发起闲鱼扫码登录，再用 `api GET /api/v1/qr-login/status/<session_id>` 查询结果。扫码确认或平台要求的手机验证仍由账号持有人完成，后续接口会自动保存账号状态。
+
+发布流程复用后端的一个规范请求结构，不在 CLI 中复制商品校验、分类推荐或发布实现：
+
+```bash
+# 上传本机图片；使用响应中的 data.paths 作为素材 JSON 的 images 字段。
+xianyu-cli api POST /api/v1/product-publish/upload/images -F files=./product.jpg
+# material.json 使用后端 MaterialCreateRequest 字段。
+xianyu-cli publish materials create --data-file ./material.json
+xianyu-cli publish materials list --page-size 20
+
+# 新版后端可查询账号 Cookie、鱼小铺状态和发布能力。
+xianyu-cli publish check-account <账号ID>
+# single.json 使用后端 PublishSingleRequest 字段，包括 account_id。
+xianyu-cli publish single --data-file ./single.json
+
+# 对每个指定账号发布每份指定素材；不会自动重试或重复提交。
+xianyu-cli publish batch --account-id <账号ID> --material-id <素材ID>
+# 批量提交返回 batch_id，只代表任务已提交。
+xianyu-cli --json publish status <batch_id>
+```
+
+批量命令支持重复传入 `--account-id` 和 `--material-id`。验收时须检查任务中的成功/失败数量、发布日志和实际商品 ID/链接；HTTP 200 或取得 `batch_id` 不代表已经上架成功。`publish` 请求被后端拒绝、`auth refresh` 失败或 `auth whoami` 未认证时，CLI 返回非零退出码。
+
+通用 `api`、`features call`、`routes call` 和 `web call` 同样支持 `--data-file`；它与 `--data` 互斥。密码、Cookie、令牌文件应只允许所有者读取，不应提交到仓库，普通输出和 `--json` 均对 Cookie、令牌、API请求头和发货内容脱敏；需要完整备份时使用通用 `api -o` 保存为仅所有者可读的文件，不把内容贴进日志。
+
+使用前端域名调用 CLI 时，Nginx 必须将 `/openapi.json` 代理至 backend-web，不能返回 SPA 页面。本仓库配置已补齐该路径；既有部署需更新前端容器后才生效。该代理仅提供接口规范，受保护接口仍需正常鉴权。需要回滚时恢复原前端镜像及 CLI 文件即可，不涉及数据库迁移。
 
 `web ops`、`features ops` 和 `routes list` 输出里的 `inputs` 字段用于提示调用参数：
 `path:name*` 对应 `-p name=...`，`query:name` 对应 `-q name=...`，`body:json*` 对应 `-d '{...}'`，`body:multipart*` 对应 `-f key=value` / `-F file=...`；`*` 表示 OpenAPI 标记为必填。
@@ -1364,3 +1422,7 @@ GET /api/v1/external/message-logs?secret_key=your-secret-key&item_id=商品ID&me
 详见 [xianyu-mobile/README.md](xianyu-mobile/README.md)。
 
 ![我的页面](xianyu-mobile/docs/screenshots/mine.png)
+
+本分支 1.1.4 支持 CapMonster 后台/CLI 配置、官方 User-Agent 与任务编号诊断，以及管理网页 30 天滚动续期，详见 [CapMonster 与登录续期](docs/capmonster-session.md)。
+
+商品内容先在仓库的 [本地商品目录](docs/products/README.md) 维护：包含商品档案、宣传图片、交付计划及线上商品/卡券关联。资料确认后再通过现有 CLI 同步到线上，并把发布与发货配置的核验结果写回档案。

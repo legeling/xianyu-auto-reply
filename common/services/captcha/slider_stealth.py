@@ -17,6 +17,7 @@ import tempfile
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -33,6 +34,7 @@ from common.services.captcha.playwright_touch import (
     dispatch_touch_drag,
 )
 from common.utils.browser_utils import ensure_playwright_browser_path, get_chromium_executable_path, is_frozen
+from common.utils.xianyu_utils import build_slider_cookie_payloads
 
 try:
     from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext, ElementHandle
@@ -518,7 +520,7 @@ class PlaywrightSliderService:
         pre_x5sec = self._read_x5sec_value()
         logger.info(
             f"【{self.pure_user_id}】滑动前 x5sec 快照："
-            f"{(pre_x5sec[:40] + '…') if pre_x5sec else '<不存在>'}"
+            f"存在={bool(pre_x5sec)}"
         )
         self.verification_checker.set_pre_x5sec(pre_x5sec)
         self.verification_checker.set_cookies_reader(self._read_all_cookies_dict)
@@ -656,6 +658,7 @@ class PlaywrightSliderService:
         url: str,
         browser_timeout: int = 20,
         url_provider: Optional[Callable[[], Optional[str]]] = None,
+        existing_cookies_str: str = "",
     ) -> Tuple[bool, Optional[Dict[str, str]]]:
         """
         运行滑块验证流程
@@ -703,8 +706,12 @@ class PlaywrightSliderService:
                 logger.warning(f"【{self.pure_user_id}】超时守护：未匹配到需强杀的浏览器进程（可能尚未启动或已退出）")
         
         try:
+            cookie_payloads = build_slider_cookie_payloads(url, existing_cookies_str)
             # 初始化浏览器
             self.init_browser()
+            if cookie_payloads:
+                self.context.add_cookies(cookie_payloads)
+                logger.info(f"【{self.pure_user_id}】已载入账号验证会话，Cookie数量={len(cookie_payloads)}")
             browser_start_time = time.time()
             logger.info(f"【{self.pure_user_id}】浏览器已启动，{browser_timeout}秒内未完成验证将自动关闭")
 
@@ -729,7 +736,7 @@ class PlaywrightSliderService:
 
             def _load_and_read(target_url: str) -> Optional[str]:
                 """导航到目标URL并读取页面内容。返回 page_content；需要中止时返回 None。"""
-                logger.info(f"【{self.pure_user_id}】导航到URL: {target_url}")
+                logger.info(f"【{self.pure_user_id}】导航到验证主机: {urlsplit(target_url).hostname}")
                 try:
                     # goto 超时设为 browser_timeout 的一半，确保不会卡住超过总超时
                     goto_timeout = min(browser_timeout * 1000 // 2, 15000)
@@ -961,7 +968,7 @@ class PlaywrightSliderService:
         pre_x5sec = self._read_x5sec_value()
         logger.info(
             f"【{self.pure_user_id}】滑动前 x5sec 快照："
-            f"{(pre_x5sec[:40] + '…') if pre_x5sec else '<不存在>'}"
+            f"存在={bool(pre_x5sec)}"
         )
         # 同步给 checker，后续二次确认会用
         self.verification_checker.set_pre_x5sec(pre_x5sec)
@@ -1587,6 +1594,7 @@ def run_slider_verification(
     headless: bool = False,
     browser_timeout: int = 20,
     url_provider: Optional[Callable[[], Optional[str]]] = None,
+    existing_cookies_str: str = "",
 ) -> Tuple[bool, Optional[Dict[str, str]]]:
     """在独立进程中运行滑块验证（模块级别函数，支持ProcessPoolExecutor）
     
@@ -1608,7 +1616,8 @@ def run_slider_verification(
             enable_learning=enable_learning,
             headless=headless
         )
-        return slider.run(url, browser_timeout=browser_timeout, url_provider=url_provider)
+        return slider.run(url, browser_timeout=browser_timeout, url_provider=url_provider,
+                          existing_cookies_str=existing_cookies_str)
     except Exception as e:
         logger.error(f"【{user_id}】滑块验证进程执行失败: {e}")
         return False, None

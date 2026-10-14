@@ -28,6 +28,9 @@ from common.utils.xianyu_utils import trans_cookies, generate_sign
 from common.utils.cookie_refresh import update_account_cookies_in_db
 from common.utils.time_utils import get_beijing_now_naive
 
+POLISH_API = "mtop.taobao.idle.item.polish"
+POLISH_API_VERSION = "1.0"
+
 
 class PolishTaskService:
     """定时擦亮任务服务"""
@@ -176,14 +179,9 @@ class PolishTaskService:
                         await update_account_cookies_in_db(account.account_id, current_cookie_str)
                         logger.info(f"【{self.task_name}】账号 {account.account_id} Cookie已通过Set-Cookie更新并写入数据库")
                     
-                    # 判断是否成功（包括"一天只能擦亮一次"的情况）
+                    # 成功须由擦亮接口确认；不能把泛化的频率提示当作已完成。
                     is_success = result.get("success")
                     error_msg = result.get("message", "")
-                    
-                    # 如果返回"一天只能擦亮一次"，也视为成功
-                    if not is_success and ("一天只能擦亮一次" in error_msg or "POLISH_DUPLICATE" in error_msg):
-                        is_success = True
-                        logger.info(f"【{self.task_name}】账号 {account.account_id} 商品 {item.item_id} 今天已擦亮过，视为成功")
                     
                     if is_success:
                         # 擦亮成功，更新商品状态
@@ -199,7 +197,7 @@ class PolishTaskService:
                             account_id=account.account_id,
                             item_id=item.item_id,
                             success=True,
-                            error_message=None
+                            error_message=error_msg if result.get("already_polished") else None
                         )
                     else:
                         failed_count += 1
@@ -327,12 +325,12 @@ class PolishTaskService:
                 'appKey': '34839810',
                 't': t,
                 'sign': '',
-                'v': '2.0',
+                'v': POLISH_API_VERSION,
                 'type': 'originaljson',
                 'accountSite': 'xianyu',
                 'dataType': 'json',
                 'timeout': '20000',
-                'api': 'mtop.taobao.idle.item.polish',
+                'api': POLISH_API,
                 'sessionOption': 'AutoLoginOnly',
                 'spm_cnt': 'a21ybx.item.0.0',
                 'spm_pre': 'a21ybx.personal.feeds.1.42f86ac21eZ9zd',
@@ -374,7 +372,7 @@ class PolishTaskService:
             # 发送请求
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    'https://h5api.m.goofish.com/h5/mtop.taobao.idle.item.polish/1.0/',
+                    f'https://h5api.m.goofish.com/h5/{POLISH_API}/{POLISH_API_VERSION}/',
                     params=params,
                     data={'data': data_val},
                     headers=headers,
@@ -392,13 +390,25 @@ class PolishTaskService:
                     
                     # 判断结果
                     if result.get('ret') and result['ret'][0] == 'SUCCESS::调用成功':
-                        return {"success": True, "message": "擦亮成功", "cookie_str": new_cookie_str}
+                        item = (result.get('data') or {}).get('itemDO') or {}
+                        if str(item.get('id')) == str(item_id) and item.get('canPolish') is False:
+                            return {"success": True, "message": "平台已确认擦亮完成", "cookie_str": new_cookie_str}
+                        return {
+                            "success": False,
+                            "message": "擦亮接口调用成功，但平台尚未确认商品已擦亮",
+                            "cookie_str": new_cookie_str,
+                        }
                     else:
                         error_msg = result.get('ret', ['未知错误'])[0] if result.get('ret') else '未知错误'
                         
-                        # 如果返回"宝贝已经擦亮过了"，也视为成功
-                        if '宝贝已经擦亮过了' in error_msg or 'IDLEITEM_POLISH_AGAIN' in error_msg:
-                            return {"success": True, "message": "商品已经擦亮过了", "cookie_str": new_cookie_str}
+                        # 平台明确确认今日已擦亮，包括用户在App手动完成的情况。
+                        if error_msg.startswith('FAIL_BIZ_IDLEITEM_POLISH_AGAIN::'):
+                            return {
+                                "success": True,
+                                "already_polished": True,
+                                "message": "平台确认今日已擦亮（本次未重复擦亮）",
+                                "cookie_str": new_cookie_str,
+                            }
                         
                         # 令牌过期时，用更新后的cookie重试
                         ret_list = result.get('ret', [])

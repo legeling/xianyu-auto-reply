@@ -1,0 +1,216 @@
+{
+  "checked_on": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "market": "中国科研数据零售",
+  "currency": "CNY",
+  "billing_unit": "一次购买一个数据包",
+  "sampling_method": "公开网页便利样本，按独立售卖选项去重，分交付类型计算未加权均值和中位数",
+  "limitations": [
+    "不代表淘宝或闲鱼全站均价；不代表成交价、销量或支付意愿。",
+    "未购买数据，交付内容与覆盖年份为卖家陈述，质量未核验。",
+    "搜索索引内容可能早于调查日期，网页直读也不等于已验证结算价格。",
+    "同一来源的不同规格不是独立卖家样本，不能据此做总体统计推断。",
+    "淘宝聚合页报价与原站规格未核实，单独记录，不纳入主样本。"
+  ],
+  "samples": [
+    {
+      "id": "AR-PDF",
+      "category": "annual_report_pdf",
+      "price_cny": 20,
+      "source_url": "https://bbs.pinggu.org/thread-16113847-1-1.html",
+      "locator": "附件购买选项：pdf版年报",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "2001–2024年A股年报PDF",
+      "attachment_date": "2025-08-31"
+    },
+    {
+      "id": "AR-TXT",
+      "category": "annual_report_text",
+      "price_cny": 45,
+      "source_url": "https://bbs.pinggu.org/thread-16113847-1-1.html",
+      "locator": "附件购买选项：txt版年报",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "2001–2024年A股年报TXT，代码另售",
+      "attachment_date": "2025-08-31"
+    },
+    {
+      "id": "AR-CNDD",
+      "category": "annual_report_text",
+      "price_cny": 69,
+      "source_url": "https://cndeepdata.pro/2024/04/09/cndd-0176-2004-2022%E5%B9%B4%E4%B8%8A%E5%B8%82%E5%85%AC%E5%8F%B8%E5%B9%B4%E6%8A%A5%EF%BC%88%E5%90%AB%E5%B9%B4%E6%8A%A5%E9%93%BE%E6%8E%A5%E5%92%8Ctxt%E6%96%87%E6%9C%AC%E6%A0%BC%E5%BC%8F%EF%BC%89/",
+      "locator": "获取方式：直接购买69元，会员价不计",
+      "access_method": "search_index",
+      "price_evidence": "reported",
+      "delivery_evidence": "reported",
+      "seller_claim": "2004–2022年年报文本、链接、TXT和Excel整理",
+      "attachment_date": null
+    },
+    {
+      "id": "AR-PANEL",
+      "category": "annual_report_bundle",
+      "price_cny": 29,
+      "source_url": "https://bbs.pinggu.org/thread-15824437-1-1.html",
+      "locator": "年报PDF+TXT+EXCEL面板购买选项",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "1998–2024年A股年报PDF、TXT、Excel文本面板",
+      "attachment_date": "2025-07-02"
+    },
+    {
+      "id": "AR-PREMIUM",
+      "category": "annual_report_bundle",
+      "price_cny": 148,
+      "source_url": "https://bbs.pinggu.org/thread-11805122-1-1.html",
+      "locator": "1999–2023上市公司年报文本数据txt与pdf购买选项",
+      "access_method": "search_index",
+      "price_evidence": "reported",
+      "delivery_evidence": "reported",
+      "seller_claim": "PDF、TXT，附代码、公司基本信息，宣称校验与支持",
+      "attachment_date": "2025-03-27"
+    },
+    {
+      "id": "MDA-TEXT",
+      "category": "mda_text",
+      "price_cny": 19,
+      "source_url": "https://bbs.pinggu.org/thread-16509557-1-1.html",
+      "locator": "MD&A文本数据2001–2024购买选项",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "MD&A文本、代码、年度、文本长度面板",
+      "attachment_date": "2026-01-29",
+      "uncertainty": "标题与介绍为2001–2024，正文另出现1998–2024，年份口径不一致"
+    },
+    {
+      "id": "MDA-TXT",
+      "category": "mda_text",
+      "price_cny": 59,
+      "source_url": "https://bbs.pinggu.org/thread-11271204-1-1.html",
+      "locator": "单独TXT文本文件数据选项，不是99元组合包",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "1999–2021年MD&A TXT",
+      "attachment_date": "2022-12-01"
+    },
+    {
+      "id": "MDA-EXCEL",
+      "category": "mda_text_and_indicators",
+      "price_cny": 25,
+      "source_url": "https://bbs.pinggu.org/thread-11527218-1-1.html",
+      "locator": "MD&A数据大全2010–2022.zip购买选项",
+      "access_method": "search_index",
+      "price_evidence": "reported",
+      "delivery_evidence": "reported",
+      "seller_claim": "MD&A内容、相似度、正负词与其他指标的Excel数据",
+      "attachment_date": "2023-06-27",
+      "uncertainty": "含半年报，与纯年度文本包口径不同"
+    },
+    {
+      "id": "MDA-BUNDLE",
+      "category": "mda_text_and_indicators",
+      "price_cny": 99,
+      "source_url": "https://bbs.pinggu.org/thread-11271204-1-1.html",
+      "locator": "MD&A含文本TXT和Excel组合选项",
+      "access_method": "public_html",
+      "price_evidence": "confirmed",
+      "delivery_evidence": "reported",
+      "seller_claim": "1999–2021年TXT，2000–2021年Excel文本及分析结果",
+      "attachment_date": "2022-12-01"
+    }
+  ],
+  "excluded_candidates": [
+    {
+      "source_url": "https://tao.hooos.com/goods_J5Mopz02SRtqN9ePz2gSXXzFvta-ejZ00KFzRvqWXGyTM.html",
+      "observed_prices_cny": [4.99, 5.99],
+      "reason": "淘宝聚合详情的优惠价和在售价；原站规格与结算价未知，分类页另为6.50/9.99",
+      "evidence": "reported"
+    },
+    {
+      "source_url": "https://bbs.pinggu.org/thread-11812691-1-1.html",
+      "observed_prices_cny": [20, 45, 10, 15],
+      "reason": "旧年度数据与同卖家新版重复；代码单售不计数据包",
+      "evidence": "reported"
+    },
+    {
+      "source_url": "https://bbs.pinggu.org/thread-11848732-1-1.html",
+      "observed_prices_cny": [128, 12888],
+      "reason": "购买入口价格和2001–2022/2023年份不一致，附公司信息，暂不纳入主样本",
+      "evidence": "confirmed"
+    },
+    {
+      "source_url": "https://bbs.pinggu.org/thread-16510872-1-1.html",
+      "observed_prices_cny": [25],
+      "reason": "与MDA-TEXT说明、数量和预览高度相近，未证明独立数据来源",
+      "evidence": "reported"
+    },
+    {
+      "source_url": "https://bbs.pinggu.org/thread-16547667-1-1.html",
+      "observed_prices_cny": [26],
+      "reason": "与MDA-TEXT说明、数量和预览高度相近，未证明独立数据来源",
+      "evidence": "reported"
+    },
+    {
+      "source_url": "https://bbs.pinggu.org/thread-11271204-1-1.html",
+      "observed_prices_cny": [59],
+      "reason": "单独Excel分析选项与99元组合包包含关系，不作为组合包独立样本",
+      "evidence": "confirmed"
+    },
+    {
+      "source_url": "https://www.ppmandata.net/trade/detail?id=2966",
+      "observed_prices_cny": [],
+      "reason": "未取得公开单品数字报价",
+      "evidence": "unknown"
+    },
+    {
+      "source_url": "https://www.cnopendata.com/data/m/listedcompany-special/listedco-MD%26A.html",
+      "observed_prices_cny": [],
+      "reason": "询价，未取得公开单品数字报价",
+      "evidence": "unknown"
+    },
+    {
+      "source_url": "https://tao.hooos.com/goods_dMAxMnZCZt3RYnRgKvujjVfet3-aAZjjVSdgkMOpdzHM.html",
+      "observed_prices_cny": [10],
+      "reason": "数据代查服务，工作量和原站规格未知，不是固定范围数据包",
+      "evidence": "reported"
+    },
+    {
+      "source_url": "https://tao.hooos.com/tag_%E7%AE%A1%E7%90%86%E5%B1%82%E7%9F%AD%E8%A7%86_1.html",
+      "observed_prices_cny": [0.5, 2.79, 3.98],
+      "reason": "管理层短视指标的聚合列表，不是MD&A原文，原站规格未知",
+      "evidence": "reported"
+    }
+  ],
+  "source_coverage": [
+    {"family": "科研数据卖家公开页面", "status": "partial", "note": "9个价格选项，7个独立页面；未购买验货"},
+    {"family": "淘宝原始商品页", "status": "partial", "note": "未取得原站规格与结算价；只有聚合页面线索"},
+    {"family": "闲鱼原始商品页", "status": "partial", "note": "公开检索未找到足够的可核实商品报价"},
+    {"family": "实际成交", "status": "not_applicable", "note": "本次调查不访问私有订单或购买商品"}
+  ],
+  "source_attempts": [
+    {"method": "web_search", "query": "site:goofish.com 年报 MD&A 数据 价格", "result": "no_result", "note": "无可用于报价统计的结果"},
+    {"method": "web_search", "query": "site:taobao.com 年报 文本 数据 MDA", "result": "no_result", "note": "无可用于报价统计的原站结果"},
+    {"method": "web_search", "query": "\"上市公司年报\" \"txt版\" \"45\" \"pdf版\"", "result": "found"},
+    {"method": "web_search", "query": "\"管理层讨论与分析\" \"2001-2024\" \"RMB 19\"", "result": "found"},
+    {"method": "web_search", "query": "\"MD&A\" \"数据大全2010-2022\" \"25\"", "result": "found"},
+    {"method": "web_search", "query": "\"上市公司年报文本数据\" \"148\" \"1999-2023\"", "result": "found"},
+    {"method": "web_search", "query": "\"CNDD-0176\" \"69\"", "result": "found"},
+    {"method": "web_search", "query": "\"上市公司MDA\" \"11271204\" \"59\"", "result": "no_result", "note": "随后公开HTML直接读到59元选项"},
+    {"method": "public_html", "url": "https://bbs.pinggu.org/thread-16113847-1-1.html", "result": "found"},
+    {"method": "public_html", "url": "https://bbs.pinggu.org/thread-11271204-1-1.html", "result": "found"},
+    {"method": "public_html", "url": "https://bbs.pinggu.org/thread-15824437-1-1.html", "result": "found"},
+    {"method": "public_html", "url": "https://bbs.pinggu.org/thread-16509557-1-1.html", "result": "found"},
+    {"method": "public_html", "url": "https://bbs.pinggu.org/thread-11848732-1-1.html", "result": "found"},
+    {"method": "web_open", "url": "https://bbs.pinggu.org/thread-11527218-1-1.html", "result": "blocked", "note": "工具返回抓取超时，使用卖家页搜索索引"},
+    {"method": "web_open", "url": "https://bbs.pinggu.org/thread-11805122-1-1.html", "result": "blocked", "note": "返回空正文，使用卖家页搜索索引"},
+    {"method": "web_open", "url": "https://tao.hooos.com/goods_J5Mopz02SRtqN9ePz2gSXXzFvta-ejZ00KFzRvqWXGyTM.html", "result": "found"},
+    {"method": "web_open", "url": "https://tao.hooos.com/goods_dMAxMnZCZt3RYnRgKvujjVfet3-aAZjjVSdgkMOpdzHM.html", "result": "found"},
+    {"method": "web_search", "query": "\"上市公司\" \"管理层\" \"数据\" site:tao.hooos.com", "result": "found", "note": "找到相邻指标品类，未找到原文包的明确规格价格"},
+    {"method": "web_search", "query": "\"MD&A\" \"文本\" site:tao.hooos.com", "result": "no_result", "note": "无可用于报价统计的原文包结果"}
+  ]
+}

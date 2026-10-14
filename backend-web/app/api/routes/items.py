@@ -1064,7 +1064,7 @@ async def batch_offline_items(
         return ApiResponse(success=False, message="该账号未登录（Cookie为空），无法下架")
 
     result = await batch_offline_items_from_xianyu(
-        account.account_id, account.cookie, payload.item_ids
+        account.account_id, account.cookie, payload.item_ids, owner_id=account.owner_id
     )
     suc_count = result.get("suc_count", 0)
     fail_count = result.get("fail_count", 0)

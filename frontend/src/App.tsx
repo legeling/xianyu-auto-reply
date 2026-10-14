@@ -5,6 +5,8 @@ import { MainLayout } from '@/components/layout/MainLayout'
 import { Toast } from '@/components/common/Toast'
 import { DisclaimerModal } from '@/components/common/DisclaimerModal'
 import { verifyToken } from '@/api/auth'
+import { refreshAccessToken } from '@/utils/request'
+import { startSessionRenewal } from '@/utils/sessionRenewal'
 import { getHiddenMenuKeysFromSettings, getPublicSystemSettings, getSystemSettings, getUserSetting, normalizeDisclaimerSettings, updateUserSetting } from '@/api/settings'
 import { getMenuAccessFallbackPath, isPathBlockedForUser } from '@/config/navigation'
 import { useMenuVisibilityStore } from '@/store/menuVisibilityStore'
@@ -118,12 +120,13 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, isAuthenticated, setAuth, clearAuth, token: storeToken, _hasHydrated } = useAuthStore()
   const { hiddenMenuKeys, isExeMode, setHiddenMenuKeys, setIsExeMode } = useMenuVisibilityStore()
   const location = useLocation()
-  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'unauthenticated'>('checking')
+  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'unauthenticated' | 'error'>('checking')
   const [disclaimerState, setDisclaimerState] = useState<'checking' | 'agreed' | 'pending'>('checking')
   const [menuState, setMenuState] = useState<'checking' | 'ready'>('checking')
   const [showDisclaimer, setShowDisclaimer] = useState(false)
   const [disclaimerSettings, setDisclaimerSettings] = useState<DisclaimerSettings>(() => normalizeDisclaimerSettings())
   const checkingRef = useRef(false)
+  const [authCheckAttempt, setAuthCheckAttempt] = useState(0)
 
   useEffect(() => {
     // 等待 zustand persist 完成 hydration
@@ -154,7 +157,13 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
         const result = await verifyToken()
         if (result.authenticated && result.user_id) {
           const refreshToken = localStorage.getItem('refresh_token') || ''
-          setAuth(token, refreshToken, {
+          const currentToken = localStorage.getItem('auth_token')
+          if (!currentToken) {
+            setAuthState('unauthenticated')
+            setMenuState('ready')
+            return
+          }
+          setAuth(currentToken, refreshToken, {
             user_id: result.user_id,
             username: result.username || '',
             is_admin: result.is_admin || false,
@@ -202,8 +211,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
           setMenuState('ready')
         }
       } catch {
-        clearAuth()
-        setAuthState('unauthenticated')
+        setAuthState(localStorage.getItem('auth_token') ? 'error' : 'unauthenticated')
         setMenuState('ready')
       } finally {
         checkingRef.current = false
@@ -211,7 +219,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     }
 
     checkAuth()
-  }, [_hasHydrated, isAuthenticated, storeToken, setAuth, clearAuth, setHiddenMenuKeys, setIsExeMode])
+  }, [_hasHydrated, isAuthenticated, storeToken, setAuth, clearAuth, setHiddenMenuKeys, setIsExeMode, authCheckAttempt])
 
   // 同意免责声明
   const handleAgreeDisclaimer = async () => {
@@ -238,6 +246,18 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    )
+  }
+
+  if (authState === 'error') {
+    return (
+      <div className="min-h-screen flex flex-col gap-4 items-center justify-center bg-slate-50 dark:bg-slate-900">
+        <p>暂时无法验证登录状态，请检查网络后重试。</p>
+        <button className="btn-ios-primary" onClick={() => {
+          setAuthState('checking')
+          setAuthCheckAttempt((attempt) => attempt + 1)
+        }}>重试</button>
       </div>
     )
   }
@@ -279,6 +299,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function App() {
   const { setIsExeMode } = useMenuVisibilityStore()
+  const { token: sessionToken, _hasHydrated } = useAuthStore()
+  useEffect(() => {
+    if (!_hasHydrated || !sessionToken) return
+    return startSessionRenewal(refreshAccessToken)
+  }, [_hasHydrated, sessionToken])
 
   useEffect(() => {
     let cancelled = false

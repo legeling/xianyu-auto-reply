@@ -1,0 +1,35 @@
+{
+  "id": "kimi-membership-account",
+  "kind": "account",
+  "status": "listed",
+  "currency": "CNY",
+  "listing": {
+    "title": "kimi 资格账号，会员 27 年 7 月 20 到期，可出",
+    "description": null,
+    "price": 2000,
+    "images": [],
+    "quantity": null,
+    "platform_category_id": null,
+    "platform_category_path": [],
+    "platform_attributes": [],
+    "address": null,
+    "shipping_method": null
+  },
+  "delivery": {
+    "mode": null,
+    "type": null,
+    "content_file": null
+  },
+  "xianyu": {
+    "account_id": "3073157444_1",
+    "material_id": null,
+    "item_id": "1082100512426",
+    "card_ids": [],
+    "last_checked_at": "2026-10-04T14:53:27+08:00"
+  },
+  "notes": [
+    "从2026-10-04生产后台已同步商品记录导入；本轮未新增、修改或重新发布该商品。",
+    "标题和2000元价格来自已有记录；描述、图片、库存及实际交付内容尚未整理。",
+    "本轮账号发货开关均关闭，商品未关联发货卡券；不将现状写成自动发货已配置。"
+  ]
+}

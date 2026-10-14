@@ -91,7 +91,7 @@ export function About() {
         if (!silent) {
           addToast({
             type: 'success',
-            message: `当前已是最新版本 v${data.current_version}`,
+            message: data.description,
           })
         }
       }
@@ -196,7 +196,7 @@ export function About() {
             ) : (
               <RefreshCw className="w-3.5 h-3.5" />
             )}
-            <span>{checkingUpdate ? '检查中...' : '检查更新'}</span>
+            <span>{checkingUpdate ? '读取中...' : '版本信息'}</span>
           </button>
         </div>
       </div>

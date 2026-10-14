@@ -1,0 +1,137 @@
+{
+  "skill": "visual-promotion-design",
+  "image_tool": "built-in image_gen",
+  "user_requirements": [
+    "简约扁平",
+    "突出实际文本资料",
+    "封面不显示价格",
+    "不同商品按内容设计",
+    "包含网盘目录和TXT正文截图，不用生图替代",
+    "提取脚本与PDF说明随资料一并提供，不突出分析功能",
+    "主图内容组必须水平、垂直居中，上下留白均衡，关键内容留足裁切边距"
+  ],
+  "images": [
+    {
+      "file": "images/01-main-centered.png",
+      "method": "image_gen_edit",
+      "edit_source": "images/01-main.png",
+      "prompt": "编辑这张闲鱼1:1商品主图，只修正整体构图。保留白底、蓝黑文字、简约扁平风格、现有文档图标和准确文案「上市公司」「MD&A」「管理层讨论与分析文本」「截至2025报告年度」。把全部文字、日期标签与图标作为紧凑的一个整体，水平和垂直居中；整个内容组位于画布中央约70%范围内，顶部与底部留白相等，四边至少留15%安全边距。适度缩小原来过大的标题、统一调整组内间距，使主体重心在正中央；不能标题贴顶、不能下方大片空白，中心裁切后字也要完整。保留清晰的大字与现有阅读顺序，不增加任何文案、价格、分析功能、立体效果或装饰。",
+      "selected_generation": "exec-9e13d27c-2b5a-476e-96d6-29b047e8f9f8.png",
+      "sha256": "1af34a9fe5556425849f23b15cab29c7abfa6680240bd4ef83fc79c28ff2544e",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "platform_update_status": "published_on_replacement_listing",
+      "review": {
+        "visible_content_bounds_px": [
+          302,
+          223,
+          960,
+          1036
+        ],
+        "margins_left_top_right_bottom_px": [
+          302,
+          223,
+          294,
+          218
+        ],
+        "central_80_percent_contains_content": true,
+        "text_visual_check": "标题、说明、报告年度与原图一致；上下留白差5px",
+        "platform_update_status": "published_on_replacement_listing"
+      },
+      "platform_item_id": "1087215043943",
+      "platform_image_url": "https://img.alicdn.com/bao/uploaded/i2/O1CN01bQFSlqApmGG2XrKe_!!3073157444-2-fleamarket.png"
+    },
+    {
+      "file": "images/02-netdisk.png",
+      "method": "user_provided_screenshot",
+      "source": "codex-clipboard-edb8d69c-8fe4-4430-8505-138c33ddc8aa.png",
+      "received_on": "2026-10-04",
+      "content": "用户提供的百度网盘目录截图，显示三份年度ZIP、提取脚本与PDF说明",
+      "processing": "原图直接复制；无裁切、改字、重绘或AI生成",
+      "sha256": "2a0eb92a122ab90456e5766fcb5947186817ce6f7879055cee2e2c2c537e2ec7",
+      "source_sha256": "2a0eb92a122ab90456e5766fcb5947186817ce6f7879055cee2e2c2c537e2ec7",
+      "dimensions_px": [
+        1586,
+        1014
+      ]
+    },
+    {
+      "file": "images/03-txt-sample.png",
+      "method": "user_provided_screenshot",
+      "source": "codex-clipboard-c0b851d0-fe3b-4209-9abc-cbd61cf4a77e.png",
+      "received_on": "2026-10-04",
+      "content": "用户提供的000001_平安银行_2025.txt正文截图，第三章末段与第四章开头",
+      "processing": "原图直接复制；无裁切、改字、重绘或AI生成",
+      "sha256": "3e8f0726b9bce50673f8234972df57c5b4a083255a8242b8255e541ccb42a014",
+      "source_sha256": "3e8f0726b9bce50673f8234972df57c5b4a083255a8242b8255e541ccb42a014",
+      "dimensions_px": [
+        1368,
+        1004
+      ]
+    }
+  ],
+  "retired_images": [
+    {
+      "file": "images/02-usage.png",
+      "method": "image_gen",
+      "prompt": "以参考图为风格参考，为同一MD&A数据商品生成1:1用途介绍图。延续简约扁平风格，清楚留白，每项简短易读，不重复主图排版。准确文案仅用「科研文本分析」「词频统计」「企业议题与关注」「语调研究」「积极与消极表达」「相似度分析」「公司与年度对比」「主题分析」「经营讨论议题」「提供文本资料，指标需自行计算」。不显示任何价格，不做立体效果、照片或仿真数据图表，不增加承诺。",
+      "revision_prompt": "把这张用途介绍图简化：保留白底、蓝黑文字和扁平风格，去掉大号重复商品标题和九宫格。顶部仅写「科研文本分析」，下方仅四行，每行把用途与解释放在一起：「词频统计｜企业议题与关注」「语调研究｜积极与消极表达」「相似度分析｜公司与年度对比」「主题分析｜经营讨论议题」。底部小字「提供文本资料，指标需自行计算」。少图标、大留白，不显示价格，不加其他文案，不做立体效果。",
+      "selected_generation": "exec-f568b739-8868-49ff-84e2-7325e22973ef.png",
+      "sha256": "f7e3f353ac42f799daac4af445cab520779fe4f426fd79cf171960d257dcc46e",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "retired_reason": "用户要求以真实资料为主、不强调分析功能；保留历史素材，不进入商品展示顺序"
+    },
+    {
+      "file": "images/04-delivery.png",
+      "method": "image_gen",
+      "prompt": "以参考图为风格参考，为同一MD&A数据商品生成1:1交付与使用说明图。延续简约扁平风格，大留白，简短清晰，不重复主图排版。准确文案仅用「交付与使用」「百度网盘交付」「MD&A章节文本」「更新至2025报告年度」「获取分享 → 下载资料 → 开展分析」「文本分析结果需另行计算」。不显示任何价格，不写已实现自动发货，不画网盘截图、虚构文件名、数据表格或立体效果，不增加其他文字。",
+      "selected_generation": "exec-17a0f187-e5ba-4402-9fc1-3a712e6d30de.png",
+      "sha256": "5d098746683642a5ba942bb4af3503160ac51cdee913171821085e55e7d253f1",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "retired_reason": "用户要求以真实资料为主、不强调分析功能；保留历史素材，不进入商品展示顺序"
+    },
+    {
+      "file": "images/03-file-list.png",
+      "method": "actual_directory_render",
+      "source": "files.csv",
+      "source_access": "2026-10-04使用用户提供的提取码校验分享，读取目录API成功",
+      "rendering": "Pillow与系统中文字体，从真实目录记录绘制文字预览，文件名与字节大小按源数据保留；不是网盘界面截图",
+      "sha256": "a1f5fd5e5ad396dc7f42f7874665a0c3af4f69c3364c1f9b8f1d2b2b03c7def2",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "retired_reason": "已取得用户提供的真实网盘目录截图，旧目录渲染图保留为历史素材，不进入当前展示顺序"
+    },
+    {
+      "file": "images/01-main.png",
+      "method": "image_gen",
+      "prompt": "生成1:1中国闲鱼电商主图，简约扁平设计，商品是上市公司MD&A文本数据。准确文案仅用「上市公司 MD&A」「管理层讨论与分析文本」「截至2025报告年度」「词频统计 · 语调研究 · 文本相似度」「¥49.9」。商品名称与用途清楚、手机缩略图醒目，少元素、大留白。不用黄色、立体书本、摄影、金属质感、渐变、投影或装饰性口号；不生成仿真表格和网盘界面。",
+      "selected_generation": "exec-ebdea151-0825-44b8-9839-b6e9f0788c75.png",
+      "sha256": "a3adea699362c80619e4b72458014d403182671fd5ad07b2825fd91a00eaac28",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "revisions": [
+        "编辑这张已认可的简约扁平电商主图：删除底部整个红色价格标签和「¥49.9」，用背景填平。其余标题、文案、图标、颜色、字体和风格全部保留，不加入任何新文字或装饰，封面不显示价格。",
+        "只编辑底部文字：删除「词频统计 · 语调研究 · 文本相似度」整行，用原白色背景自然填平。保留其他所有标题、日期、图标、尺寸、布局和简约扁平视觉风格，不添加任何新文字、价格或元素。"
+      ],
+      "retired_reason": "主体偏上、标题贴顶、底部留白过多；保留线上原版用于发布对照。"
+    }
+  ],
+  "pending_real_screenshots": [],
+  "screenshot_status": "已有用户提供的网盘目录与TXT正文两张截图，按原图纳入展示；未操作浏览器取得截图，未下载或解压全量资料。",
+  "additional_optional_screenshots": [
+    "压缩包内公司与年度文件目录",
+    "另一公司或年度的真实TXT样例"
+  ]
+}

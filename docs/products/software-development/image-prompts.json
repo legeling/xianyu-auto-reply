@@ -1,0 +1,29 @@
+{
+  "skill": "visual-promotion-design",
+  "image_tool": "built-in image_gen",
+  "user_requirements": [
+    "每个商品只生成一张1:1主图",
+    "封面好看，服务内容和标题清楚",
+    "不加入无关人物或办公场景",
+    "文案引导私聊需求并留邮箱",
+    "商品标价100元，具体需求详聊后报价"
+  ],
+  "images": [
+    {
+      "file": "images/main.png",
+      "method": "image_gen",
+      "prompt": "生成一张1:1中文电商主图，精致好看，商品主体和标题醒目，适合手机缩略图。整体居中，四边有裁切余量。不加人物、无关装饰、价格、品牌logo或额外营销承诺。界面是设计示意，只使用下面指定文字，其他界面内容用图形表达。自由设计。 商品“项目开发定制”。用精致软件窗口、代码形态与相连的功能模块组成清晰的项目开发主体，暖橙色与深灰色，画面有层次但不杂乱，代码用无文字线条表达。准确文案：“项目开发”“功能 · 接口 · 系统”“按需求定制”。",
+      "selected_generation": "exec-5bdf5f99-d4af-4d2d-84b2-ad2f34e2c216.png",
+      "sha256": "5b8606c16c5d813b25260379f636323a549917a168ea9275a4ef98395229b232",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "review": {
+        "status": "visual_checked",
+        "text": "服务名称、核心内容与按需求定制清楚可读；无人物场景。",
+        "user_approval": "not_required_for_requested_listing"
+      }
+    }
+  ]
+}

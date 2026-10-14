@@ -1,9 +1,3 @@
-"""
-版本号管理模块
+"""启动器与 Web 共用本分支的产品版本。"""
 
-定义当前程序版本号，供在线更新模块对比使用。
-版本号格式: 主版本.次版本.修订号
-"""
-
-# 当前程序版本号
-CURRENT_VERSION = "1.0.10"
+from common.version import CURRENT_VERSION  # noqa: F401

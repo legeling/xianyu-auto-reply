@@ -76,6 +76,7 @@ def _compile_sql_with_params(statement, parameters):
             "admin_password_hash",
             "password_login.remote_secret_key",
             "token.remote_secret_key",
+            "captcha.remote_secret_key",
         }
 
         def _is_sensitive_key(value) -> bool:

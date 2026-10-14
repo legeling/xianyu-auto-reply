@@ -31,6 +31,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     token_sub.add_parser("clear", help="清除本地 token")
 
     auth_sub.add_parser("whoami", help="验证当前 token")
+    auth_sub.add_parser("refresh", help="使用已保存的 refresh token 更新登录态")
     auth_sub.add_parser("logout", help="清除本地登录态")
     parser.set_defaults(handler=handle)
 
@@ -51,21 +52,19 @@ def handle(args: argparse.Namespace) -> None:
         if not response.get("success"):
             raise CliError(response.get("message") or "登录失败")
 
-        config.update(
-            {
-                "base_url": str(base_url).rstrip("/"),
-                "token": response.get("token"),
-                "refresh_token": response.get("refresh_token"),
-                "user": {
-                    "user_id": response.get("user_id"),
-                    "username": response.get("username"),
-                    "is_admin": response.get("is_admin"),
-                    "account_limit": response.get("account_limit"),
-                },
-            }
-        )
-        save_config(config)
+        _save_login_response(config, str(base_url), response)
         print(f"登录成功：{response.get('username') or args.username}")
+        return
+
+    if args.auth_action == "refresh":
+        refresh_token = config.get("refresh_token")
+        if not refresh_token:
+            raise CliError("未保存 refresh token，请重新登录。")
+        response = ApiClient(str(base_url), str(refresh_token)).request("POST", "/api/v1/auth/refresh")
+        if not response.get("success"):
+            raise CliError(response.get("message") or "刷新登录态失败，请重新登录。")
+        _save_login_response(config, str(base_url), response)
+        print("登录态已刷新")
         return
 
     if args.auth_action == "token":
@@ -74,6 +73,8 @@ def handle(args: argparse.Namespace) -> None:
 
     if args.auth_action == "whoami":
         response = build_client(args).request("GET", "/api/v1/auth/verify")
+        if not response.get("authenticated"):
+            raise CliError("登录令牌无效或已过期，请运行 auth refresh 或重新登录。")
         print_output(response, json_output=args.json)
         return
 
@@ -85,6 +86,23 @@ def handle(args: argparse.Namespace) -> None:
         return
 
     raise CliError("未知 auth 操作")
+
+
+def _save_login_response(config: dict[str, Any], base_url: str, response: dict[str, Any]) -> None:
+    if not response.get("token") or not response.get("refresh_token"):
+        raise CliError("登录响应缺少令牌，未更新本地登录态。")
+    config.update(
+        {
+            "base_url": base_url.rstrip("/"),
+            "token": response["token"],
+            "refresh_token": response["refresh_token"],
+            "user": {
+                key: response.get(key)
+                for key in ("user_id", "username", "is_admin", "account_limit")
+            },
+        }
+    )
+    save_config(config)
 
 
 def handle_token(args: argparse.Namespace, config: dict[str, Any], base_url: str) -> None:

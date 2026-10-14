@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { MessageSquare, User, Lock, Mail, KeyRound, Eye, EyeOff } from 'lucide-react'
-import { AuthNavbar } from '@/components/common/AuthNavbar'
 import { getDefaultLoginBrandingSettings } from '@/api/settings'
 import { login, verifyToken, getRegistrationStatus, getLoginInfoStatus, generateCaptcha, verifyCaptcha, sendVerificationCode, getLoginCaptchaStatus, getLoginBrandingSettings } from '@/api/auth'
 import { useAuthStore } from '@/store/authStore'
@@ -277,9 +276,7 @@ export function Login() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-900 transition-colors duration-200">
-      <AuthNavbar systemName={loginBranding['login.system_name']} />
-
-      <div className="flex-1 flex pt-14">
+      <div className="flex-1 flex">
       {/* Left side - Branding */}
       <motion.div 
         initial={{ opacity: 0, x: -20 }}

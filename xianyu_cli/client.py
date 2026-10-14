@@ -5,6 +5,7 @@ import argparse
 import json
 import mimetypes
 import os
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from urllib.request import Request, urlopen
 
 from xianyu_cli.config import load_config
 from xianyu_cli.constants import DEFAULT_BASE_URL
-from xianyu_cli.exceptions import CliError
+from xianyu_cli.exceptions import CliError, ensure_success
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,9 @@ class ApiClient:
     ) -> Any:
         url = self._build_url(path, params)
         body = None
-        headers = {"Accept": "application/json"}
+        # 自定义 UA：stdlib urllib 默认的 "Python-urllib/x.y" 会被 Cloudflare
+        # Browser Integrity Check（error 1010）拦截
+        headers = {"Accept": "application/json", "User-Agent": "xianyu-cli/1.0"}
 
         body, content_type = _build_request_body(data=data, form=form, files=files or [])
         if content_type:
@@ -67,15 +70,22 @@ class ApiClient:
             raise CliError(f"请求失败：{exc.reason}") from exc
 
         if output_path:
+            if "json" in content_type:
+                try:
+                    ensure_success(json.loads(raw))
+                except json.JSONDecodeError as exc:
+                    raise CliError("导出接口返回无效JSON，未保存文件") from exc
             return _save_response(raw, output_path, content_type)
         if not raw:
             return None
 
         text = raw.decode("utf-8", errors="replace")
         try:
-            return json.loads(text)
+            result = json.loads(text)
         except json.JSONDecodeError:
             return text
+        ensure_success(result)
+        return result
 
     def get_openapi(self) -> dict[str, Any]:
         response = self.request("GET", "/openapi.json", auth=False)
@@ -142,7 +152,7 @@ def _build_request_body(
         return _encode_multipart(form or {}, files)
     if data is None:
         return None, None
-    return json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json"
+    return json.dumps(data, ensure_ascii=False).encode(), "application/json"
 
 
 def _encode_multipart(form: dict[str, Any], files: list[FilePart]) -> tuple[bytes, str]:
@@ -154,14 +164,14 @@ def _encode_multipart(form: dict[str, Any], files: list[FilePart]) -> tuple[byte
     for file_part in files:
         _append_file_field(body, boundary, file_part)
 
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    body.extend(f"--{boundary}--\r\n".encode())
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
 def _append_form_field(body: bytearray, boundary: str, key: str, value: Any) -> None:
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
-    body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"))
-    body.extend(_format_form_value(value).encode("utf-8"))
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
+    body.extend(_format_form_value(value).encode())
     body.extend(b"\r\n")
 
 
@@ -172,11 +182,11 @@ def _append_file_field(body: bytearray, boundary: str, file_part: FilePart) -> N
 
     filename = file_path.name
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f"--{boundary}\r\n".encode())
     body.extend(
-        f'Content-Disposition: form-data; name="{file_part.field}"; filename="{filename}"\r\n'.encode("utf-8")
+        f'Content-Disposition: form-data; name="{file_part.field}"; filename="{filename}"\r\n'.encode()
     )
-    body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+    body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
     body.extend(file_path.read_bytes())
     body.extend(b"\r\n")
 
@@ -191,9 +201,18 @@ def _format_form_value(value: Any) -> str:
 
 def _save_response(raw: bytes, output_path: str, content_type: str) -> dict[str, Any]:
     target = Path(output_path).expanduser()
-    if target.parent != Path(""):
+    temporary = None
+    try:
         target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(raw)
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as destination:
+            temporary = Path(destination.name)
+            destination.write(raw)
+        os.replace(temporary, target)
+    except OSError as exc:
+        raise CliError(f"无法保存导出文件：{target}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return {
         "saved_to": str(target.resolve()),
         "bytes": len(raw),
@@ -211,5 +230,10 @@ def _extract_error_message(raw: bytes) -> str | None:
     if isinstance(detail, str):
         return detail
     if detail:
+        if isinstance(detail, list):
+            return "; ".join(
+                f"{'.'.join(str(part) for part in item.get('loc', []))}: {item.get('msg', '参数无效')}"
+                for item in detail if isinstance(item, dict)
+            ) or "参数无效"
         return json.dumps(detail, ensure_ascii=False)
     return None

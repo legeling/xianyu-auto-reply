@@ -1,0 +1,85 @@
+{
+  "id": "app-development",
+  "kind": "service",
+  "status": "listed",
+  "currency": "CNY",
+  "listing": {
+    "title": "App开发定制 手机应用界面功能接口开发 需求详聊",
+    "description": "承接App开发与功能定制，可沟通应用页面、业务功能、接口对接及现有应用修改等需求。\n\n可开普通发票，开票需求请提前沟通。\n\n请先私聊：应用用途、目标平台、主要功能、有无设计稿或现有项目、预算及期望时间。请留下联系邮箱，方便发送方案与报价。\n\n页面标价¥100，具体费用、交付内容和周期按需求确认。请先沟通，确认范围与报价后再下单。",
+    "price": 100,
+    "images": [
+      "images/main.png"
+    ],
+    "quantity": 1,
+    "platform_category_id": "50023914",
+    "platform_category_path": [
+      {
+        "id": "201450801",
+        "name": "服务"
+      },
+      {
+        "id": "201458715",
+        "name": "IT技术"
+      },
+      {
+        "id": "201458716",
+        "name": "软件设计与开发"
+      },
+      {
+        "id": "201453616",
+        "name": "软件/程序/网站开发"
+      }
+    ],
+    "platform_attributes": [
+      {
+        "property_id": "506537872",
+        "property_name": "预计工期",
+        "value_id": "72988874",
+        "value_name": "待议",
+        "properties": null
+      },
+      {
+        "property_id": "150360447",
+        "property_name": "计价方式",
+        "value_id": "20213",
+        "value_name": "其他",
+        "properties": null
+      }
+    ],
+    "address": "杭州",
+    "shipping_method": "none",
+    "address_expected_text": "杭州",
+    "category": "软件/程序/网站开发",
+    "platform_category_name": "软件/程序/网站开发",
+    "platform_channel_category_id": "201453616",
+    "platform_channel_category_name": "软件/程序/网站开发",
+    "platform_leaf_id": null,
+    "platform_tb_category_id": "50014907",
+    "category_source": "recommendation",
+    "category_confidence": 0.9958779811859131
+  },
+  "delivery": {
+    "mode": "manual",
+    "type": null,
+    "content_file": null
+  },
+  "xianyu": {
+    "account_id": "3073157444_1",
+    "material_id": null,
+    "item_id": "1088762151696",
+    "card_ids": [],
+    "last_checked_at": "2026-10-10T16:35:22+08:00"
+  },
+  "notes": [
+    "2026-10-10用户要求制作¥100接单商品，先查看封面与文案。",
+    "¥100按页面展示价编写；具体服务范围、报价、交付周期与验收方式按需求沟通，未承诺整套开发总价为¥100。",
+    "用户确认价格都详聊，页面统一标价100元；按用户本轮上架请求执行。",
+    "分类与属性来自本次平台推荐；预计工期选择待议，计价方式选择其他，不添加固定工期或售后承诺。",
+    "沿用既有账号商品所在地杭州和无需物流配置；数量1沿用发布合同默认。",
+    "2026-10-10按用户要求以100元发布成功，商品ID 1088762151696，发布日志ID 5。",
+    "平台在售列表回读：标题、100元价格与1254×1254封面一致。正文已按保存的发布载荷提交；商品列表接口不回读完整正文，未声称逐字核验线上正文。",
+    "定制服务采用人工沟通与交付；未绑定发货卡券，未改动账号级自动发货及其他既有商品配置。",
+    "2026-10-10用户确认可开普票，商品正文补充普通发票说明。",
+    "2026-10-10普票说明已原位更新线上正文，并通过editDetail逐字回读；商品ID、标题、售价、图片、分类、地址、运费与数量均核对保持一致。"
+  ]
+}

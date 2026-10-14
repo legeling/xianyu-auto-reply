@@ -12,7 +12,7 @@
  */
 import { useState, useEffect } from 'react'
 import { ShieldAlert, RefreshCw, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Loader2, Calendar, Info, TrendingUp, Settings } from 'lucide-react'
-import { getRiskLogs, clearRiskLogs, clearProcessingRiskLogs, testRemoteSliderSolve, getRemoteCaptchaConfig, saveRemoteCaptchaConfig, getRiskTodaySuccessRate, getLocalSliderConfig, updateLocalSliderConfig, type RiskLog, type RiskTodaySuccessRate } from '@/api/admin'
+import { getRiskLogs, clearRiskLogs, clearProcessingRiskLogs, testRemoteSliderSolve, getRemoteCaptchaConfig, saveRemoteCaptchaConfig, getRiskTodaySuccessRate, getLocalSliderConfig, updateLocalSliderConfig, type RemoteCaptchaProvider, type RiskLog, type RiskTodaySuccessRate } from '@/api/admin'
 import { getAccountDetails } from '@/api/accounts'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
@@ -71,6 +71,7 @@ export function RiskLogs() {
   const [clearingProcessing, setClearingProcessing] = useState(false)
 
   // 远程过滑块全局配置（仅管理员可见，存储于 system_settings）
+  const [remoteProvider, setRemoteProvider] = useState<RemoteCaptchaProvider>('remote')
   const [remoteUrl, setRemoteUrl] = useState('')
   const [remoteSecret, setRemoteSecret] = useState('')
   const [passCookies, setPassCookies] = useState(false)
@@ -151,6 +152,7 @@ export function RiskLogs() {
     try {
       const res = await getRemoteCaptchaConfig()
       if (res.success && res.data) {
+        setRemoteProvider(res.data.provider)
         setRemoteUrl(res.data.url || '')
         setRemoteSecret(res.data.secret_key || '')
         setPassCookies(!!res.data.pass_cookies)
@@ -263,6 +265,7 @@ export function RiskLogs() {
         normWeight(remoteWeight),
         processingMax,
         cooldownSeconds,
+        remoteProvider,
       )
       if (res.success) {
         addToast({ type: 'success', message: '远程过滑块配置已保存' })
@@ -278,7 +281,7 @@ export function RiskLogs() {
 
   const handleTestRemoteConfig = async () => {
     const url = remoteUrl.trim()
-    if (!url) {
+    if (!url && remoteProvider === 'remote') {
       addToast({ type: 'error', message: '请先填写远程服务URL' })
       return
     }
@@ -286,7 +289,7 @@ export function RiskLogs() {
     if (rejectTokenApiUrl(url)) return
     try {
       setTesting(true)
-      const res = await testRemoteSliderSolve(url, remoteSecret.trim())
+      const res = await testRemoteSliderSolve(url, remoteSecret.trim(), remoteProvider)
       addToast({ type: res.success ? 'success' : 'error', message: res.message || (res.success ? '连接成功' : '连接失败') })
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '测试失败') })
@@ -444,11 +447,22 @@ export function RiskLogs() {
           <div className="flex items-start gap-2 mb-4 px-3 py-2.5 rounded-lg bg-blue-50 dark:bg-blue-500/10 border border-blue-100 dark:border-blue-500/20">
             <Info className="w-4 h-4 mt-0.5 shrink-0 text-blue-500 dark:text-blue-400" />
             <div className="text-xs leading-relaxed text-blue-700 dark:text-blue-300 space-y-0.5">
-              <p>填写 <span className="font-medium">https://xy-api.zhinianboke.com/api/v1/captcha/slider-solve</span> 使用远程服务过滑块验证，提高成功率。</p>
-              <p>秘钥请在 <span className="font-medium">xy.zhinianboke.com</span> 注册账号后，于个人设置中获取，测试返回[punish 链接不能为空]，代表成功。</p>
+              <p>选择 CapMonster 并填写 <a href="https://capmonster.cloud" target="_blank" rel="noreferrer" className="underline">CapMonster Cloud</a> 账户的 API Key。测试只查询余额，不产生验证码任务费用。</p>
+              <p>CapMonster 接收验证链接，不上传完整账号 Cookie。自动验证成功后仍须以闲鱼接受 Token、账号在线为准。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-end gap-4">
+            <div className="input-group min-w-[220px]">
+              <label className="input-label">验证码服务</label>
+              <select className="input-ios" value={remoteProvider} onChange={(e) => {
+                setRemoteProvider(e.target.value as RemoteCaptchaProvider)
+                setRemoteSecret('')
+              }}>
+                <option value="capmonster">CapMonster Cloud</option>
+                <option value="remote">自建远程服务</option>
+              </select>
+            </div>
+            {remoteProvider === 'remote' && (
             <div className="input-group flex-1 min-w-[260px]">
               <label className="input-label">远程服务URL</label>
               <input
@@ -459,13 +473,15 @@ export function RiskLogs() {
                 className="input-ios"
               />
             </div>
+            )}
             <div className="input-group flex-1 min-w-[260px]">
-              <label className="input-label">秘钥</label>
+              <label className="input-label">{remoteProvider === 'capmonster' ? 'CapMonster API Key' : '秘钥'}</label>
               <input
-                type="text"
+                type="password"
+                autoComplete="new-password"
                 value={remoteSecret}
                 onChange={(e) => setRemoteSecret(e.target.value)}
-                placeholder="个人设置中的秘钥"
+                placeholder="填写密钥；*** 表示已保存"
                 className="input-ios"
               />
             </div>
@@ -491,6 +507,7 @@ export function RiskLogs() {
           <div className="mt-4 flex flex-wrap gap-x-8 gap-y-4">
           {/* 是否传递账号Cookie（默认关闭）：开启后调用远程接口时会把当前账号 Cookie 传给远程服务，
               远程端在验证链接过期时可凭 Cookie 自动重取新链接，提高成功率 */}
+          {remoteProvider === 'remote' && (
           <div className="flex items-start gap-3 flex-1 min-w-[300px]">
             <button
               type="button"
@@ -515,6 +532,7 @@ export function RiskLogs() {
             </div>
           </div>
 
+          )}
           <div className="flex items-start gap-3 flex-1 min-w-[300px]">
             <button
               type="button"

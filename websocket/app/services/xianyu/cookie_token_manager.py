@@ -499,9 +499,9 @@ class CookieTokenManager:
                     if hasattr(self.parent, 'user_id') and self.parent.user_id:
                         current_user_id = self.parent.user_id
 
-                    # 打印要保存的x5sec值
+                    # 只记录验证Cookie是否存在
                     cookies_dict = trans_cookies(self.cookies_str)
-                    logger.warning(f"【{self.cookie_id}】update_config_cookies保存的x5sec: {cookies_dict.get('x5sec', '无')[:80]}...")
+                    logger.info(f"【{self.cookie_id}】保存验证Cookie，x5sec存在={bool(cookies_dict.get('x5sec'))}")
                     
                     # 使用 update_cookie_account_info 避免覆盖其他字段
                     success = await update_account_cookies_in_db(
@@ -616,7 +616,7 @@ class CookieTokenManager:
         """读取全局"远程过滑块"配置（system_settings，仅管理员可配）。
 
         Returns:
-            dict {url, secret, pass_cookies, device_id}；未配置或读取失败返回 None（此时走本机逻辑）。
+            dict {provider, url, secret, pass_cookies, device_id}；未配置或读取失败返回 None（此时走本机逻辑）。
             - pass_cookies 为 True 时表示"调用远程接口时传递账号 Cookie"（默认关闭）；
             - device_id 仅在 pass_cookies 开启时一并下发，供远程端在链接过期时重取新链接。
         """
@@ -625,30 +625,21 @@ class CookieTokenManager:
             from common.models.system_setting import SystemSetting
             from sqlalchemy import select
 
+            from common.services.captcha.provider_config import (
+                REMOTE_PROVIDER_KEY, REMOTE_URL_KEY, REMOTE_SECRET_KEY,
+                REMOTE_PASS_COOKIES_KEY, remote_config_from_settings,
+            )
+
             async with async_session_maker() as session:
                 rows = (await session.execute(
-                    select(SystemSetting).where(
-                        SystemSetting.key.in_(
-                            [
-                                "captcha.remote_service_url",
-                                "captcha.remote_secret_key",
-                                "captcha.remote_pass_cookies",
-                            ]
-                        )
-                    )
+                    select(SystemSetting).where(SystemSetting.key.in_(
+                        [REMOTE_PROVIDER_KEY, REMOTE_URL_KEY, REMOTE_SECRET_KEY, REMOTE_PASS_COOKIES_KEY]
+                    ))
                 )).scalars().all()
-            m = {r.key: (r.value or "") for r in rows}
-            url = (m.get("captcha.remote_service_url") or "").strip()
-            secret = (m.get("captcha.remote_secret_key") or "").strip()
-            pass_cookies = (m.get("captcha.remote_pass_cookies") or "").strip().lower() == "true"
-            if url and secret:
-                return {
-                    "url": url,
-                    "secret": secret,
-                    "pass_cookies": pass_cookies,
-                    # 仅开启开关时下发 device_id，未开启则不携带任何账号信息
-                    "device_id": (self.device_id or "") if pass_cookies else "",
-                }
+            config = remote_config_from_settings({r.key: (r.value or "") for r in rows})
+            if config:
+                config["device_id"] = (self.device_id or "") if config["pass_cookies"] else ""
+            return config
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】读取远程过滑块配置失败（走本机逻辑）: {self._safe_str(e)}")
         return None
@@ -680,7 +671,7 @@ class CookieTokenManager:
                 logger.info(f"【{self.cookie_id}】未找到验证URL，认为不需要滑块验证")
                 return None
 
-            logger.info(f"【{self.cookie_id}】验证URL: {verification_url}")
+            logger.info(f"【{self.cookie_id}】已收到平台验证链接")
             
             # 同账号的“检查处理中状态 + 创建日志”使用同一临界区，避免并发重复滑块。
             log_id = None
@@ -891,8 +882,8 @@ class CookieTokenManager:
                         self.cookies_str = cookies_str
                         self.cookies = updated_cookies
                         
-                        # 打印更新后的x5sec值
-                        logger.warning(f"【{self.cookie_id}】准备保存到数据库的x5sec: {updated_cookies.get('x5sec', '无')}")
+                        # 只记录验证Cookie是否存在
+                        logger.info(f"【{self.cookie_id}】准备保存验证Cookie，x5sec存在={bool(updated_cookies.get('x5sec'))}")
 
                         if not await self.update_config_cookies():
                             raise RuntimeError("滑块Cookie写回数据库失败")

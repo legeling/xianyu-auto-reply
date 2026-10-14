@@ -72,7 +72,7 @@ class BaseConfig(BaseSettings):
     jwt_secret_key: str = Field(default="change-me", repr=False)
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=30)
-    refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
+    refresh_token_expire_minutes: int = Field(default=60 * 24 * 30)
 
     # 服务间调用 /internal 接口使用的共享令牌；留空时由启动流程从数据库自动加载或生成。
     internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN", repr=False)

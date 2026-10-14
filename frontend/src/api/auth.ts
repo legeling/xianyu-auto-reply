@@ -1,4 +1,4 @@
-import { post, get } from '@/utils/request'
+import { post, get, refreshAccessToken } from '@/utils/request'
 import { normalizeLoginBrandingSettings } from '@/api/settings'
 import type { LoginBrandingSettings, LoginRequest, LoginResponse, ApiResponse } from '@/types'
 
@@ -42,8 +42,13 @@ export const login = (data: LoginRequest): Promise<LoginResponse> => {
 }
 
 // 验证 Token
-export const verifyToken = (): Promise<{ authenticated: boolean; user_id?: number; username?: string; is_admin?: boolean; account_limit?: number | null }> => {
-  return get(`${AUTH_PREFIX}/verify`)
+type TokenVerification = { authenticated: boolean; user_id?: number; username?: string; is_admin?: boolean; account_limit?: number | null }
+export const verifyToken = async (): Promise<TokenVerification> => {
+  const result = await get<TokenVerification>(`${AUTH_PREFIX}/verify`)
+  if (result.authenticated || !localStorage.getItem('refresh_token')) return result
+  // verify 的未认证响应是 HTTP 200/authenticated=false，不经过 401 拦截器。
+  await refreshAccessToken()
+  return get<TokenVerification>(`${AUTH_PREFIX}/verify`)
 }
 
 // 用户登出

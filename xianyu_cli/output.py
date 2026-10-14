@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from xianyu_cli.constants import SENSITIVE_FIELDS
+from xianyu_cli.exceptions import ensure_success
 
 
 def print_output(
@@ -14,6 +15,8 @@ def print_output(
     columns: list[str] | None = None,
     max_width: int = 40,
 ) -> None:
+    ensure_success(data)
+    data = mask_sensitive(data)
     if json_output:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return
@@ -23,7 +26,7 @@ def print_output(
         print_table(rows, columns=columns, max_width=max_width)
         return
 
-    print(json.dumps(mask_sensitive(data), ensure_ascii=False, indent=2))
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def extract_rows(data: Any) -> list[dict[str, Any]] | None:
@@ -33,7 +36,7 @@ def extract_rows(data: Any) -> list[dict[str, Any]] | None:
     if not isinstance(data, dict):
         return None
 
-    for key in ("data", "items"):
+    for key in ("data", "items", "list"):
         value = data.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
@@ -96,7 +99,7 @@ def format_cell(value: Any) -> str:
 def mask_sensitive(data: Any) -> Any:
     if isinstance(data, dict):
         return {
-            key: (_mask_secret(str(value)) if key in SENSITIVE_FIELDS and value else mask_sensitive(value))
+            key: (_mask_secret(str(value)) if key.lower() in SENSITIVE_FIELDS and value else mask_sensitive(value))
             for key, value in data.items()
         }
     if isinstance(data, list):
@@ -105,6 +108,4 @@ def mask_sensitive(data: Any) -> Any:
 
 
 def _mask_secret(value: str) -> str:
-    if len(value) <= 8:
-        return "****"
-    return f"{value[:4]}...{value[-4:]}"
+    return "****"

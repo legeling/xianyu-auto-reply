@@ -1,0 +1,24 @@
+{
+  "checked_at": "2026-10-10T16:35:22+08:00",
+  "account_id": "3073157444_1",
+  "item_id": "1089670126050",
+  "operation": "update_description",
+  "edit_api": "mtop.idle.pc.idleitem.edit",
+  "readback_api": "mtop.idle.pc.idleitem.editDetail",
+  "api_version": "1.0",
+  "description_before_sha256": "55334d0142310726998f49fbad57cb82162a3f006d07dc0ddf430c0ee889c9fd",
+  "description_after_sha256": "f5a5818a2578a3c03bf50e4d5e80831bacf4c64a2e0df99596dec1be134cebc1",
+  "platform_readback_matches": true,
+  "unchanged": {
+    "itemId": true,
+    "itemPriceDTO": true,
+    "itemAddrDTO": true,
+    "itemPostFeeDTO": true,
+    "itemCatDTO": true,
+    "imageInfoDOList": true,
+    "itemLabelExtList": true,
+    "quantity": true,
+    "title": true
+  },
+  "invoice_text": "可开普通发票，开票需求请提前沟通。"
+}

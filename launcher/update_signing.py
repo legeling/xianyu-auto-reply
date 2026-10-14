@@ -17,7 +17,7 @@
   私钥种子（单行），由运营方离线保管，绝不提交到仓库（.gitignore 已排除
   *.pem / *.key / launcher/private_key*）。
 - 也可用环境变量 XIANYU_UPDATE_PRIVATE_KEY 代替 --private-key-file。
-- 签名对应的验签公钥嵌入 launcher/updater.py（_UPDATE_PUBLIC_KEY_B64）。
+- 这是保留的上游清单签名工具；本独立分支通过部署发布，不使用该清单更新。
 """
 import argparse
 import base64

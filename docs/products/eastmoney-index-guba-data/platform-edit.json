@@ -1,0 +1,29 @@
+{
+  "checked_at": "2026-10-06T19:20:30+08:00",
+  "account_id": "3073157444_1",
+  "item_id": "1088597030202",
+  "operation": "update_description",
+  "edit_api": "mtop.idle.pc.idleitem.edit",
+  "readback_api": "mtop.idle.pc.idleitem.editDetail",
+  "api_version": "1.0",
+  "official_source_url": "https://g.alicdn.com/idle-pc/xy-site/0.0.176/js/p_publish-index.js",
+  "source_sha256": "adaa298b7202e14104c2ae125276432152fc4f30d6208b5bd2f13b8781958d86",
+  "description_before_sha256": "174cfd3fc2d1da3d08b5c32368bea5dfd299e4c31e422ad2f773c16555479c02",
+  "description_after_sha256": "83470cc6d729b625c280f656e6a8eb670b0684f7483059ba0dc44100c70ab2d1",
+  "platform_readback_matches": true,
+  "unchanged": {
+    "itemId": true,
+    "itemPriceDTO": true,
+    "itemAddrDTO": true,
+    "itemPostFeeDTO": true,
+    "itemCatDTO": true,
+    "imageInfoDOList": true,
+    "itemLabelExtList": true,
+    "quantity": true,
+    "title": true
+  },
+  "delivery_card_id": 4,
+  "delivery_card_enabled": true,
+  "auto_relist_rule_id": 2,
+  "auto_relist_enabled": true
+}

@@ -62,7 +62,7 @@ const onRefreshFailed = (error: Error) => {
 }
 
 /** 用刷新令牌获取新的访问令牌；并发请求共用同一次刷新。 */
-const refreshAccessToken = async (): Promise<string> => {
+export const refreshAccessToken = async (): Promise<string> => {
   if (isRefreshing) return waitForTokenRefresh()
 
   const refreshToken = localStorage.getItem('refresh_token')
@@ -77,11 +77,17 @@ const refreshAccessToken = async (): Promise<string> => {
     // 刷新接口使用独立 axios 调用，避免再次进入本实例的鉴权拦截器。
     const response = await axios.post('/api/v1/auth/refresh', {}, {
       headers: { Authorization: `Bearer ${refreshToken}` },
+      timeout: request.defaults.timeout,
     })
     const data = response.data
-    if (!data?.success || !data.token || !data.refresh_token) {
+    if (localStorage.getItem('refresh_token') !== refreshToken) {
+      throw new Error('登录状态已变更')
+    }
+    if (data?.success === false) {
+      useAuthStore.getState().clearAuth()
       throw createAuthenticationError(data)
     }
+    if (!data?.success || !data.token || !data.refresh_token) throw new Error('续期响应缺少登录令牌')
 
     const authStore = useAuthStore.getState()
     authStore.updateTokens(data.token, data.refresh_token)
@@ -99,7 +105,10 @@ const refreshAccessToken = async (): Promise<string> => {
     const error = reason instanceof Error
       ? reason
       : new Error('登录已过期，请重新登录')
-    useAuthStore.getState().clearAuth()
+    if (axios.isAxiosError(reason) && reason.response?.status === 401
+      && localStorage.getItem('refresh_token') === refreshToken) {
+      useAuthStore.getState().clearAuth()
+    }
     onRefreshFailed(error)
     throw error
   } finally {

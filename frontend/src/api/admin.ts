@@ -142,15 +142,19 @@ export const clearSystemLogs = (): Promise<ApiResponse> => {
 }
 
 // 测试远程过滑块服务连通性（服务端代理，规避跨域）
+export type RemoteCaptchaProvider = 'remote' | 'capmonster'
+
 export const testRemoteSliderSolve = async (
   url: string,
   secret_key: string,
+  provider: RemoteCaptchaProvider,
 ): Promise<ApiResponse> => {
-  return post(`${API_PREFIX}/captcha/slider-solve/test`, { url, secret_key })
+  return post(`${API_PREFIX}/captcha/slider-solve/test`, { url, secret_key, provider })
 }
 
 // 读取远程过滑块全局配置（仅管理员）
 export const getRemoteCaptchaConfig = async (): Promise<ApiResponse<{
+  provider: RemoteCaptchaProvider
   url: string
   secret_key: string
   pass_cookies: boolean
@@ -174,8 +178,10 @@ export const saveRemoteCaptchaConfig = async (
   remote_weight: number,
   remote_processing_max: number,
   remote_cooldown_seconds: number,
+  provider: RemoteCaptchaProvider,
 ): Promise<ApiResponse> => {
   return put(`${API_PREFIX}/captcha/remote-config`, {
+    provider,
     url,
     secret_key,
     pass_cookies,

@@ -1,0 +1,31 @@
+{
+  "skill": "visual-promotion-design",
+  "image_tool": "built-in image_gen",
+  "user_requirements": [
+    "每个商品只生成一张1:1主图",
+    "封面好看，服务内容和标题清楚",
+    "不加入无关人物或办公场景",
+    "文案引导私聊需求并留邮箱",
+    "商品标价100元，具体需求详聊后报价"
+  ],
+  "images": [
+    {
+      "file": "images/main.png",
+      "method": "image_gen_edit",
+      "prompt": "生成一张1:1中文电商主图，精致好看，商品主体和标题醒目，适合手机缩略图。整体居中，四边有裁切余量。不加人物、无关装饰、价格、品牌logo或额外营销承诺。界面是设计示意，只使用下面指定文字，其他界面内容用图形表达。自由设计。 商品“App开发定制”。以精致手机界面和应用功能页面组成有吸引力的画面，柔和紫色与白色，突出移动应用开发，画面丰富而有序。准确文案：“APP开发”“界面 · 功能 · 接口”“按需求定制”。",
+      "selected_generation": "exec-ae4828c7-168c-4ee7-a232-3ba3b31b4ebb.png",
+      "sha256": "b54942e954d4c543c21b35de198d221db31296743321b21da7cfe31936b4d643",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "review": {
+        "status": "visual_checked",
+        "text": "服务名称、核心内容与按需求定制清楚可读；无人物场景。",
+        "user_approval": "not_required_for_requested_listing"
+      },
+      "edit_source_generation": "exec-eacbadad-73fd-48f9-bf64-9437f7fcb184.png",
+      "edit_prompt": "仅清理这张App开发商品封面里的额外界面文字。保留紫白配色、1:1比例、手机主体、功能图标、背景页面和全部构图。仅保留三处文字：“APP开发”“界面 · 功能 · 接口”“按需求定制”。手机屏幕内的标语、图标下方文字、底部导航文字和时间数字均替换为无文字的短灰色占位线，保留图标和界面排版。其余设计不变，不增加任何文字。"
+    }
+  ]
+}

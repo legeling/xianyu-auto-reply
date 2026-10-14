@@ -5,7 +5,25 @@ import argparse
 import sys
 
 from xianyu_cli import __version__
-from xianyu_cli.commands import accounts, api, auth, config, doctor, features, health, items, keywords, orders, routes, settings, web
+from xianyu_cli.commands import (
+    accounts,
+    api,
+    auth,
+    cards,
+    captcha,
+    config,
+    delivery,
+    doctor,
+    features,
+    health,
+    items,
+    keywords,
+    orders,
+    publish,
+    routes,
+    settings,
+    web,
+)
 from xianyu_cli.constants import DEFAULT_BASE_URL
 from xianyu_cli.exceptions import CliError
 
@@ -13,7 +31,7 @@ from xianyu_cli.exceptions import CliError
 def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help=f"Backend-Web 地址，默认 {DEFAULT_BASE_URL}")
     parser.add_argument("--openapi-file", help="从本地 OpenAPI JSON 文件读取接口定义，用于离线审计")
-    parser.add_argument("--json", action="store_true", help="输出完整 JSON")
+    parser.add_argument("--json", action="store_true", help="输出结构化 JSON（敏感字段脱敏）")
     parser.add_argument("--version", action="version", version=f"xianyu-cli {__version__}")
 
 
@@ -29,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
         health,
         accounts,
         items,
+        publish,
+        cards,
+        captcha,
+        delivery,
         orders,
         keywords,
         settings,

@@ -13,6 +13,8 @@ const PREFIX = '/api/v1/version'
 /** 当前版本信息 */
 export interface CurrentVersion {
   version: string
+  upstream_version: string
+  upstream_commit: string
 }
 
 /** 更新检查结果 */
@@ -21,6 +23,7 @@ export interface VersionCheckResult {
   has_update: boolean
   /** 当前版本号 */
   current_version: string
+  upstream_version: string
   /** 远程版本号 */
   remote_version: string
   /** 更新说明（可能包含 \n） */

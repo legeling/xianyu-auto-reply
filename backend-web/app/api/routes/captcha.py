@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import re
@@ -36,6 +37,11 @@ from app.core.config import get_settings
 from common.db.session import async_session_maker
 from common.models.system_setting import SystemSetting
 from common.models.user import User
+from common.services.captcha.provider_config import (
+    CAPMONSTER_API_URL, DEFAULT_REMOTE_PROVIDER, REMOTE_PROVIDER_KEY,
+    REMOTE_URL_KEY, REMOTE_SECRET_KEY, REMOTE_PASS_COOKIES_KEY, RemoteProvider,
+)
+from common.services.captcha.capmonster import CapMonsterError, test_connection
 from common.schemas.common import ApiResponse
 from common.utils.internal_auth import build_internal_auth_headers, is_internal_api_url
 
@@ -79,12 +85,14 @@ class SliderSolveRequest(BaseModel):
 
 class TestRemoteSolveRequest(BaseModel):
     """测试远程过滑块服务连通性请求"""
-    url: str                             # 远程过滑块服务URL
+    provider: RemoteProvider = DEFAULT_REMOTE_PROVIDER
+    url: str = ""                        # 自建远程服务URL；CapMonster 使用固定地址
     secret_key: str = ""                 # 秘钥（用于校验远程是否接受该秘钥）
 
 
 class RemoteConfigUpdate(BaseModel):
     """远程过滑块全局配置（仅管理员）"""
+    provider: RemoteProvider = DEFAULT_REMOTE_PROVIDER
     url: str = ""
     secret_key: str = ""
     pass_cookies: bool = False   # 是否在调用远程接口时传递账号 Cookie（默认关闭）
@@ -97,9 +105,6 @@ class RemoteConfigUpdate(BaseModel):
 
 
 # 远程过滑块全局配置存储 key（system_settings，全局唯一，仅管理员可读写）
-REMOTE_CONFIG_URL_KEY = "captcha.remote_service_url"
-REMOTE_CONFIG_SECRET_KEY = "captcha.remote_secret_key"
-REMOTE_CONFIG_PASS_COOKIES_KEY = "captcha.remote_pass_cookies"
 REMOTE_CONFIG_BLOCK_REMOTE_CALLS_KEY = "captcha.block_remote_calls"
 # real_mouse 排队权重（与 common/services/captcha/weighted_scheduler.py 的键保持一致）
 REMOTE_CONFIG_WEIGHT_LOCAL_KEY = "captcha.real_mouse_weight_local"
@@ -672,6 +677,7 @@ async def slider_solve(
 async def test_remote_slider_solve(
     request: TestRemoteSolveRequest,
     current_user: User = Depends(deps.get_current_admin_user),  # 仅管理员可发起（也避免被滥用做 SSRF）
+    db: AsyncSession = Depends(deps.get_db_session),
 ) -> ApiResponse:
     """测试远程过滑块服务连通性与秘钥有效性（服务端代理请求，规避浏览器跨域）。
 
@@ -680,6 +686,21 @@ async def test_remote_slider_solve(
     - 提示缺少链接/其它正常业务响应 → 连接成功且秘钥有效
     - 网络异常 → 无法连接
     """
+    secret = (request.secret_key or "").strip()
+    if secret == "***":
+        provider = (await db.execute(select(SystemSetting.value).where(
+            SystemSetting.key == REMOTE_PROVIDER_KEY
+        ))).scalar_one_or_none() or DEFAULT_REMOTE_PROVIDER
+        if provider != request.provider:
+            return ApiResponse(success=False, message="更换供应商后请填写新密钥并保存")
+        secret = await SystemSettingService(db).resolve_sensitive_value(REMOTE_SECRET_KEY, secret)
+    if request.provider == "capmonster":
+        try:
+            result = await asyncio.to_thread(test_connection, secret)
+            return ApiResponse(success=True, message=f"CapMonster 连接成功，余额 ${result['balance']} USD", data=result)
+        except CapMonsterError as exc:
+            return ApiResponse(success=False, message=str(exc))
+
     import aiohttp
 
     url = (request.url or "").strip()
@@ -693,7 +714,7 @@ async def test_remote_slider_solve(
         return domain_error
 
     payload = {
-        "secret_key": (request.secret_key or "").strip(),
+        "secret_key": secret,
         "account_id": "connectivity-test",
         "url": "",  # 故意留空：只测连通+秘钥，不真正过滑块
     }
@@ -773,9 +794,10 @@ async def get_remote_config(
         rows = (await db.execute(
             select(SystemSetting).where(
                 SystemSetting.key.in_([
-                    REMOTE_CONFIG_URL_KEY,
-                    REMOTE_CONFIG_SECRET_KEY,
-                    REMOTE_CONFIG_PASS_COOKIES_KEY,
+                    REMOTE_PROVIDER_KEY,
+                    REMOTE_URL_KEY,
+                    REMOTE_SECRET_KEY,
+                    REMOTE_PASS_COOKIES_KEY,
                     REMOTE_CONFIG_BLOCK_REMOTE_CALLS_KEY,
                     REMOTE_CONFIG_WEIGHT_LOCAL_KEY,
                     REMOTE_CONFIG_WEIGHT_REMOTE_KEY,
@@ -790,11 +812,12 @@ async def get_remote_config(
     m = {r.key: (r.value or "") for r in rows}
     # 安全（M2 修复）：远程过滑块共享密钥属于敏感密钥类设置，GET 脱敏返回 "***"，
     # 前端原样提交回来时 PUT 端会忽略不更新（保留原值）
-    masked_secret = "***" if m.get(REMOTE_CONFIG_SECRET_KEY) else ""
+    masked_secret = "***" if m.get(REMOTE_SECRET_KEY) else ""
     return ApiResponse(success=True, data={
-        "url": m.get(REMOTE_CONFIG_URL_KEY, ""),
+        "provider": m.get(REMOTE_PROVIDER_KEY, DEFAULT_REMOTE_PROVIDER),
+        "url": CAPMONSTER_API_URL if m.get(REMOTE_PROVIDER_KEY) == "capmonster" else m.get(REMOTE_URL_KEY, ""),
         "secret_key": masked_secret,
-        "pass_cookies": (m.get(REMOTE_CONFIG_PASS_COOKIES_KEY, "") or "").strip().lower() == "true",
+        "pass_cookies": (m.get(REMOTE_PASS_COOKIES_KEY, "") or "").strip().lower() == "true",
         "block_remote_calls": (m.get(REMOTE_CONFIG_BLOCK_REMOTE_CALLS_KEY, "true") or "true").strip().lower() == "true",
         "local_weight": _sanitize_weight(m.get(REMOTE_CONFIG_WEIGHT_LOCAL_KEY), 1.0),
         "remote_weight": _sanitize_weight(m.get(REMOTE_CONFIG_WEIGHT_REMOTE_KEY), 1.0),
@@ -820,15 +843,24 @@ async def update_remote_config(
         return ApiResponse(success=False, message="远程调用冷却时间不能小于 0")
 
     # 拦截误填的 Token 获取接口域名，避免把取Token地址配成过滑块服务地址
-    remote_url = (request.url or "").strip()
+    if (request.secret_key or "").strip() == "***":
+        provider = (await db.execute(select(SystemSetting.value).where(
+            SystemSetting.key == REMOTE_PROVIDER_KEY
+        ))).scalar_one_or_none() or DEFAULT_REMOTE_PROVIDER
+        if provider != request.provider:
+            return ApiResponse(success=False, message="更换供应商时请填写新密钥或清空密钥")
+    remote_url = CAPMONSTER_API_URL if request.provider == "capmonster" else (request.url or "").strip()
+    if remote_url and not remote_url.lower().startswith(("http://", "https://")):
+        return ApiResponse(success=False, message="远程服务URL 必须以 http:// 或 https:// 开头")
     domain_error = _check_token_api_domain(remote_url)
     if domain_error:
         return domain_error
 
     settings_to_save: dict[str, tuple[str, str | None]] = {
-        REMOTE_CONFIG_URL_KEY: (remote_url, "远程过滑块服务URL"),
-        REMOTE_CONFIG_PASS_COOKIES_KEY: (
-            "true" if request.pass_cookies else "false",
+        REMOTE_PROVIDER_KEY: (request.provider, "远程验证码供应商"),
+        REMOTE_URL_KEY: (remote_url, "远程过滑块服务URL"),
+        REMOTE_PASS_COOKIES_KEY: (
+            "true" if request.provider == "remote" and request.pass_cookies else "false",
             "远程过滑块是否传递账号Cookie",
         ),
         REMOTE_CONFIG_BLOCK_REMOTE_CALLS_KEY: (
@@ -848,7 +880,7 @@ async def update_remote_config(
     # 安全：密钥原样提交脱敏占位符 "***" 时忽略不更新（保留原值）；
     # 提交空字符串表示管理员显式清空，提交其它新值则正常更新
     if (request.secret_key or "").strip() != "***":
-        settings_to_save[REMOTE_CONFIG_SECRET_KEY] = (
+        settings_to_save[REMOTE_SECRET_KEY] = (
             (request.secret_key or "").strip(),
             "远程过滑块秘钥",
         )

@@ -1,0 +1,88 @@
+{
+  "checked_on": "2026-10-06",
+  "currency": "CNY",
+  "method": "公开售卖页面和搜索索引便利样本；不是淘宝/闲鱼全站抽样或成交数据",
+  "samples": [
+    {
+      "id": "pingan-corpus",
+      "kind": "raw_text",
+      "price_cny": 19,
+      "title": "平安银行股吧语料",
+      "seller_claim": "71888条记录，CSV/XLSX，6.68MB",
+      "source_url": "https://bbs.pinggu.org/thread-11673326-1-1.html",
+      "price_evidence": "search_index",
+      "source_date": "2023-12-10"
+    },
+    {
+      "id": "company-text-database",
+      "kind": "raw_text",
+      "price_cny": 300,
+      "title": "股吧评论文本数据库",
+      "seller_claim": "上市公司股吧文本，标注1990–2024、2.5亿+样本；年份及数量未购买核验",
+      "source_url": "https://www.tulingdata.cn/2907/",
+      "price_evidence": "public_page",
+      "source_date": "2025-10-26"
+    },
+    {
+      "id": "sentiment-excel",
+      "kind": "derived_metrics",
+      "price_cny": 9,
+      "title": "上市公司股吧情感统计Excel",
+      "seller_claim": "2008–2022帖子总量、正负中性量、阅读及评论统计",
+      "source_url": "https://bbs.pinggu.org/thread-11490521-1-1.html",
+      "price_evidence": "search_index",
+      "source_date": "2023-03-30"
+    },
+    {
+      "id": "sentiment-panel",
+      "kind": "derived_metrics",
+      "price_cny": 49,
+      "title": "股吧舆论情绪与发帖评论阅读量",
+      "seller_claim": "2008–2023上市公司统计及情绪数据，约700MB",
+      "source_url": "https://bbs.pinggu.org/thread-13581455-1-1.html",
+      "price_evidence": "search_index",
+      "source_date": null
+    },
+    {
+      "id": "sentiment-bundle",
+      "kind": "derived_metrics",
+      "price_cny": 98,
+      "title": "股吧讨论、投资者情绪、网络关注度合集",
+      "seller_claim": "2008–2024上市公司面板指标，宣称5000+企业及5万+观测",
+      "source_url": "https://bbs.pinggu.org/thread-16568159-1-1.html",
+      "price_evidence": "search_index",
+      "source_date": "2026-03-24"
+    }
+  ],
+  "excluded": [
+    {
+      "source_url": "https://zldatas.com/9179.html",
+      "seller_claim": "上证指数股吧2010–2024.3，列出标题、阅读数、评论数、发布日期与时间",
+      "reason": "仅显示SVIP下载，没有独立商品售价，不纳入均价"
+    }
+  ],
+  "statistics": {
+    "related_mixed_samples": {
+      "count": 5,
+      "mean_price_cny": 95,
+      "median_price_cny": 49,
+      "interpretation": "仅是不同规模、不同交付类型的5项相关公开标价统计，不能当作同规格市场均价"
+    },
+    "raw_text": {
+      "count": 2,
+      "mean_price_cny": 159.5,
+      "interpretation": "单吧小包与上市公司超大库差异明显，不能作为我们的25指数合集均价"
+    },
+    "derived_metrics": {
+      "count": 3,
+      "mean_price_cny": 52,
+      "median_price_cny": 49
+    }
+  },
+  "recommendation": {
+    "full_bundle_trial_price_cny": 99.9,
+    "lower_launch_option_cny": 79.9,
+    "adopted": false,
+    "reason": "完整25股吧合集、近期帖子截止、正文与评论关系保留；尚无销量、付费意愿和同规格市场统计，属于试售判断"
+  }
+}

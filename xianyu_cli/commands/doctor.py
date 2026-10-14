@@ -26,6 +26,8 @@ def handle(args: argparse.Namespace) -> None:
     checks.append(_check_token(args, bool(config.get("token"))))
 
     print_output(checks, json_output=args.json, columns=["name", "ok", "detail"])
+    if not all(check["ok"] for check in checks):
+        raise CliError("CLI连接或登录诊断未全部通过，请核对上面的失败项")
 
 
 def _check_health(client) -> dict[str, object]:

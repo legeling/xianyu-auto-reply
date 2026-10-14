@@ -27,7 +27,7 @@ interface UpdateModalProps {
 }
 
 /** 项目仓库主页地址，Web 端「前往下载」固定跳转到此处 */
-const REPO_URL = 'https://github.com/zhinianboke/xianyu-auto-reply'
+const REPO_URL = 'https://github.com/legeling/xianyu-auto-reply'
 
 /**
  * 将更新说明字符串按换行切分为非空行数组

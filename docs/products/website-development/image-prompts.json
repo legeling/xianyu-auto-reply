@@ -1,0 +1,31 @@
+{
+  "skill": "visual-promotion-design",
+  "image_tool": "built-in image_gen",
+  "user_requirements": [
+    "每个商品只生成一张1:1主图",
+    "封面好看，服务内容和标题清楚",
+    "不加入无关人物或办公场景",
+    "文案引导私聊需求并留邮箱",
+    "商品标价100元，具体需求详聊后报价"
+  ],
+  "images": [
+    {
+      "file": "images/main.png",
+      "method": "image_gen_edit",
+      "prompt": "生成一张1:1中文电商主图，精致好看，商品主体和标题醒目，适合手机缩略图。整体居中，四边有裁切余量。不加人物、无关装饰、价格、品牌logo或额外营销承诺。界面是设计示意，只使用下面指定文字，其他界面内容用图形表达。自由设计。 商品“网站开发定制”。用漂亮的网站页面、桌面和移动端页面组成清楚的商品画面，蓝白色调，突出网页设计与搭建。准确文案：“网站开发”“官网 · 页面 · 后台”“按需求定制”。",
+      "selected_generation": "exec-1f77f1ec-331f-4b2a-b427-04ba8ede6dab.png",
+      "sha256": "b62fb28baf8f19947ace65d6206d7d0eba4ed033665af7bd40d1a1152a556766",
+      "dimensions_px": [
+        1254,
+        1254
+      ],
+      "review": {
+        "status": "visual_checked",
+        "text": "服务名称、核心内容与按需求定制清楚可读；无人物场景。",
+        "user_approval": "not_required_for_requested_listing"
+      },
+      "edit_source_generation": "exec-4dae51fa-b833-4c9d-bd58-8e1869d9f0ef.png",
+      "edit_prompt": "仅清理这张网站开发商品封面里的额外界面文字。保留蓝白配色、1:1比例、电脑手机与网页画面、全部构图和大标题。仅保留三处文字：“网站开发”“官网 · 页面 · 后台”“按需求定制”。电脑、笔记本和手机屏幕里所有中文、英文、数字、乱码均替换为无文字的灰色占位线，保留风景照片、图标和页面排版。其余设计不变，不增加任何文字。"
+    }
+  ]
+}

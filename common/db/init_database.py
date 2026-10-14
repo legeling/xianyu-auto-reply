@@ -310,7 +310,7 @@ class DatabaseInitializer:
         ),
         (
             "show_default_login_info",
-            "true",
+            "false",
             "登录页是否展示默认账号密码提示",
         ),
     )
@@ -3620,9 +3620,9 @@ class DatabaseInitializer:
         
         try:
             async with async_session_maker() as session:
-                # 检查是否已存在admin用户
+                # 管理员可能已改名；按角色判断，升级时不能重建已知初始密码的账号。
                 result = await session.execute(
-                    text("SELECT id FROM xy_users WHERE username = 'admin' LIMIT 1")
+                    text("SELECT id FROM xy_users WHERE role = 'ADMIN' LIMIT 1")
                 )
                 existing = result.fetchone()
                 
@@ -3644,8 +3644,7 @@ class DatabaseInitializer:
                 await session.commit()
                 
                 logger.info("✓ 默认管理员用户创建成功")
-                logger.info("  用户名: admin")
-                logger.info("  密码: admin123")
+                logger.info("  首次登录后请修改初始密码")
                 
         except IntegrityError:
             logger.info("✓ 管理员用户已存在，跳过创建")
@@ -4015,9 +4014,9 @@ class DatabaseInitializer:
 
 
 async def init_database():
-    """初始化数据库（供外部调用）"""
-    initializer = DatabaseInitializer()
-    await initializer.init_all()
+    """按顺序执行本分支的数据库迁移。"""
+    from common.db.migrations import upgrade_database
+    await upgrade_database()
 
 
 # 如果直接运行此脚本

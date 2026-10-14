@@ -46,6 +46,7 @@ def _call_remote_solve(
     browser_timeout: int,
     cookies_str: str = "",
     device_id: str = "",
+    provider: str = "remote",
 ) -> Tuple[str, Optional[Dict[str, str]], Optional[str]]:
     """调用远程过滑块接口。
 
@@ -61,6 +62,12 @@ def _call_remote_solve(
                 'fallback'（超时或网络不可用，应回退本机逻辑）
         message: 远程接口返回的失败原因或本地解析原因
     """
+    if provider == "capmonster":
+        from common.services.captcha.capmonster import solve
+        return solve(remote_secret, url, browser_timeout)
+    if provider != "remote":
+        return "fail", None, "未知远程验证码服务"
+
     import requests
 
     payload = {
@@ -141,9 +148,9 @@ def run_slider_verification_with_fallback(
         enable_learning: 主引擎是否启用轨迹学习
         headless: 主引擎是否无头
         browser_timeout: 主引擎单次超时（秒）
-        existing_cookies_str: 现有 cookie 字符串，供兜底引擎注入
+        existing_cookies_str: 当前账号会话，供本机验证浏览器注入
         url_provider: 可选回调，浏览器就绪后用于重新获取新鲜验证链接，规避等待槽位导致的链接过期
-        remote_config: 远程过滑块配置 dict {url, secret, pass_cookies, device_id} | None。
+        remote_config: 远程过滑块配置 dict {provider, url, secret, pass_cookies, device_id} | None。
             pass_cookies 为 True 时，会把 existing_cookies_str 与 device_id 一并传给远程端，
             供其在链接过期时重取新链接继续处理。
         weight_class: 排队来源类别（"local"=本地Token刷新 / "remote"=远程过滑块接口），
@@ -171,7 +178,8 @@ def run_slider_verification_with_fallback(
                 r_cookies = ""
                 r_device_id = ""
             status, r_cookies_out, remote_message = _call_remote_solve(
-                r_url, r_secret, user_id, url, browser_timeout, r_cookies, r_device_id
+                r_url, r_secret, user_id, url, browser_timeout, r_cookies, r_device_id,
+                provider=remote_config.get("provider", "remote"),
             )
             if status == "ok" and _has_x5sec(r_cookies_out):
                 logger.info(f"【{user_id}】远程过滑块成功，采用远程结果")
@@ -197,7 +205,8 @@ def run_slider_verification_with_fallback(
                     logger.info(f"【{user_id}】重取验证链接失败，远程过滑块按失败处理（不回退）")
                     return False, None, "remote"
                 status, r_cookies_out, remote_message = _call_remote_solve(
-                    r_url, r_secret, user_id, fresh, browser_timeout, r_cookies, r_device_id
+                    r_url, r_secret, user_id, fresh, browser_timeout, r_cookies, r_device_id,
+                    provider=remote_config.get("provider", "remote"),
                 )
                 if status == "ok" and _has_x5sec(r_cookies_out):
                     logger.info(f"【{user_id}】远程过滑块成功（刷新链接后），采用远程结果")
@@ -258,6 +267,7 @@ def run_slider_verification_with_fallback(
     ok, cookies = run_slider_verification(
         user_id, url, enable_learning, headless, browser_timeout,
         url_provider=url_provider,
+        existing_cookies_str=existing_cookies_str,
     )
     if ok and _has_x5sec(cookies):
         return True, cookies, "playwright"

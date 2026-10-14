@@ -1,0 +1,38 @@
+{
+  "id": "eastmoney-guba-data",
+  "kind": "data",
+  "status": "draft",
+  "currency": "CNY",
+  "listing": {
+    "title": "东方财富股吧公司指数帖子评论数据截至2026年8月31日",
+    "description": "东方财富股吧公司与指数相关历史帖子和评论数据。\n\n帖子发布日期截至2026年8月31日，各股吧的数据起点不同。内容包括帖子标题、正文、发布日期、阅读数、评论数，以及评论文本和回复关系。CSV中帖子与评论按同一条记录关联保存。\n\n评论按实际采集结果提供，不表示2026年8月31日当天的历史评论快照。具体公司、指数范围及文件目录以实际交付清单为准。",
+    "price": null,
+    "images": [
+      "images/main.png"
+    ],
+    "quantity": null,
+    "platform_category_id": null,
+    "platform_category_path": [],
+    "platform_attributes": [],
+    "address": null,
+    "shipping_method": null
+  },
+  "delivery": {
+    "mode": "automatic",
+    "type": null,
+    "content_file": null
+  },
+  "xianyu": {
+    "account_id": "3073157444_1",
+    "material_id": null,
+    "item_id": null,
+    "card_ids": [],
+    "last_checked_at": null
+  },
+  "notes": [
+    "沿用既有股吧商品文案和主图；日期、字段及范围须与实际交付文件核对后再发布。",
+    "具体公司/指数清单、售价、交付文件或下载链接尚未确定。",
+    "已保存1张主图；其余介绍图及真实CSV/目录样例尚未制作。",
+    "自动发货是计划，尚无已配置的发货卡券。"
+  ]
+}

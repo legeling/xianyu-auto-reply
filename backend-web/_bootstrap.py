@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI):
         await init_database()
     except Exception as e:
         logger.error(f"数据库初始化失败: {e}")
+        raise
     
     # 自检 JWT 密钥：弱/默认值时自动生成强随机密钥并持久化（源码启动兜底）
     # 安全（M3 修复）：初始化失败时 ensure_jwt_secret_key 会抛出异常，

@@ -40,7 +40,6 @@ class BackendWebConfig(BaseConfig):
     jwt_secret_key: str = Field(default="change-me", repr=False)
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=1440)
-    refresh_token_expire_minutes: int = Field(default=60 * 24 * 7)
 
     # 外部消息发送接口（/api/v1/message/send）的 API 密钥
     # 安全（H3 修复）：不再内置硬编码默认密钥；未配置（环境变量 API_SECRET_KEY）时

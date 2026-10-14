@@ -74,6 +74,7 @@ git push origin dev
 | 移除广告模块 | `backend-web/app/api/routes/advertisements.py`、`common/models/advertisement.py`、`frontend/src/api/advertisements.ts`、`frontend/src/pages/advertisements/**`、Dashboard 广告位、导航"广告"菜单、底部"广告申请"入口、系统设置中的 `ad_price.*` / `auth.footer_ad_html` | 上游对这些文件的修改**一律不采纳**（modify/delete 冲突选删除）；上游新增的广告相关代码块（菜单项、路由、组件、设置卡片）不并入。`REMOVED_SYSTEM_SETTING_KEYS` 过滤逻辑必须保留 |
 | xianyu-cli 命令行工具 | `xianyu_cli/`、`tests/`、`scripts/xianyu_cli.py`、根级 `pyproject.toml` | 上游若新增同名文件需人工核对，不直接覆盖 |
 | 分支与工程规范 | `BRANCHING.md`、`.gitignore` 中本地新增条目（如 `trajectory_history/`） | `.gitignore` 冲突时**两侧条目都保留** |
+| 独立产品版本和发布 | `common/version.py`、版本 API、`launcher/version.py` / `updater.py`、`common/db/migrations/`、`docker/*/Dockerfile.release` | 保留我们的 `CURRENT_VERSION`，仅更新上游来源记录；禁止重新接入上游发布包自动覆盖。已发布的编号迁移不改写，新结构增加后续迁移 |
 | 启动器精简 | `launcher/gui_dashboard.py` | 上游改动可合入，但需人工确认不引入已移除的广告相关入口 |
 
 通用原则：

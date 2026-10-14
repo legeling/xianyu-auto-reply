@@ -13,11 +13,13 @@ import random
 import struct
 import time
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 from loguru import logger
 
 
 CLOSE_NOTICE_API = "mtop.taobao.idlemessage.pc.profile.notice.update"
+SLIDER_COOKIE_DOMAINS = ("goofish.com", "taobao.com")
 
 
 def canonical_goofish_item_url(item_id: Any) -> str:
@@ -54,6 +56,20 @@ def trans_cookies(cookies_str: str) -> Dict[str, str]:
             if key:
                 cookies[key] = value.strip()
     return cookies
+
+
+def build_slider_cookie_payloads(url: str, cookies_str: str) -> list[dict[str, Any]]:
+    """把账号会话注入当前平台验证主机，避免向任意链接泄露登录凭据。"""
+    if not cookies_str:
+        return []
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    if (parsed.scheme != "https" or parsed.username or parsed.password
+            or parsed.port not in (None, 443)
+            or not any(host == domain or host.endswith("." + domain) for domain in SLIDER_COOKIE_DOMAINS)):
+        raise ValueError("账号会话只能注入闲鱼或淘宝的 HTTPS 验证主机")
+    return [{"name": name, "value": value, "domain": host, "path": "/", "secure": True}
+            for name, value in trans_cookies(cookies_str).items()]
 
 
 def extract_account_user_id_from_cookie(cookies_str: str) -> str:
